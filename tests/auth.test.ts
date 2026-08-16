@@ -1,0 +1,168 @@
+import { describe, expect, it } from 'vitest';
+import { createApiServer } from '../apps/api/server.js';
+import { assertExposureIsSafe, UnsafeExposureError } from '../apps/api/auth.js';
+import { ConfigError, loadConfig } from '../src/config/env.js';
+import { FixedClock } from '../src/core/clock.js';
+import { TradingAgent } from '../apps/worker/agent.js';
+import { Deduplicator } from '../src/ingestion/dedup.js';
+import { FixtureMarketDataAdapter } from '../src/ingestion/market_data/fixture.js';
+import { MarketDataService } from '../src/ingestion/market_data/index.js';
+import type { IngestionStack } from '../src/ingestion/pipeline.js';
+
+/**
+ * Dashboard exposure.
+ *
+ * The dashboard is read-only, so the risk is not that a stranger trades — it is
+ * that a stranger reads a live portfolio, its positions and every signal. The
+ * property under test is that publishing it requires a password, and that
+ * forgetting one fails loudly rather than quietly serving the page.
+ */
+
+const clock = FixedClock.at('2026-08-16T12:00:00Z');
+const PASSWORD = 'a-long-enough-password';
+
+function emptyStack(): IngestionStack {
+  return {
+    documentSources: [],
+    macroSources: [],
+    marketData: new MarketDataService({
+      providers: [new FixtureMarketDataAdapter({ clock, basePrices: { AAPL: 200 } })],
+      maxStalenessSeconds: 120,
+      clock,
+    }),
+    adapters: [],
+    deduplicator: new Deduplicator({ clock }),
+  };
+}
+
+function agentFor(env: Record<string, string> = {}) {
+  const config = loadConfig({ WATCHLIST: 'AAPL', ...env });
+  const agent = new TradingAgent({ config, clock, stack: emptyStack() });
+  return { agent, config };
+}
+
+async function request(
+  env: Record<string, string>,
+  headers: Record<string, string> = {},
+  path = '/',
+): Promise<{ status: number; body: string; challenge?: string }> {
+  const { agent, config } = agentFor(env);
+  const server = createApiServer({ agent, config });
+
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', async () => {
+      const { port } = server.address() as { port: number };
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, { headers });
+      const challenge = res.headers.get('www-authenticate') ?? undefined;
+      resolve({
+        status: res.status,
+        body: await res.text(),
+        ...(challenge ? { challenge } : {}),
+      });
+      server.close();
+    });
+  });
+}
+
+function basic(user: string, password: string): Record<string, string> {
+  return { authorization: `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}` };
+}
+
+describe('dashboard exposure gate', () => {
+  it('refuses a non-loopback bind without a password', () => {
+    expect(() => assertExposureIsSafe('0.0.0.0', undefined)).toThrow(UnsafeExposureError);
+  });
+
+  it('names the SSH tunnel alternative rather than only refusing', () => {
+    // A refusal that does not say what to do instead gets worked around.
+    expect(() => assertExposureIsSafe('0.0.0.0', undefined)).toThrow(/ssh -N -L/);
+  });
+
+  it('allows a non-loopback bind once a password is set', () => {
+    expect(() => assertExposureIsSafe('0.0.0.0', PASSWORD)).not.toThrow();
+  });
+
+  it('allows loopback with no password at all', () => {
+    expect(() => assertExposureIsSafe('127.0.0.1', undefined)).not.toThrow();
+  });
+
+  it('fails the whole boot, not just the server, on an unsafe combination', () => {
+    // Refusing at config load means no cycle runs and no state is written
+    // before the mistake surfaces.
+    expect(() => loadConfig({ DASHBOARD_HOST: '0.0.0.0' })).toThrow(ConfigError);
+  });
+
+  it('rejects a password short enough to brute force', () => {
+    expect(() => loadConfig({ DASHBOARD_HOST: '0.0.0.0', DASHBOARD_PASSWORD: 'short' })).toThrow(
+      ConfigError,
+    );
+  });
+});
+
+describe('dashboard authentication', () => {
+  it('serves the page unauthenticated when no password is configured', async () => {
+    const response = await request({});
+    expect(response.status).toBe(200);
+    expect(response.body).toContain('AI Market Agent');
+  });
+
+  it('challenges an anonymous request once a password is set', async () => {
+    const response = await request({ DASHBOARD_PASSWORD: PASSWORD });
+    expect(response.status).toBe(401);
+    expect(response.challenge).toMatch(/^Basic realm=/);
+  });
+
+  it('leaks no portfolio data in the challenge body', async () => {
+    const response = await request({ DASHBOARD_PASSWORD: PASSWORD });
+    expect(response.body).not.toContain('10000');
+    expect(response.body).not.toContain('Portfolio');
+  });
+
+  it('accepts the right credentials', async () => {
+    const response = await request({ DASHBOARD_PASSWORD: PASSWORD }, basic('admin', PASSWORD));
+    expect(response.status).toBe(200);
+    expect(response.body).toContain('AI Market Agent');
+  });
+
+  it('rejects the right user with the wrong password', async () => {
+    const response = await request({ DASHBOARD_PASSWORD: PASSWORD }, basic('admin', 'wrong-password'));
+    expect(response.status).toBe(401);
+  });
+
+  it('rejects the right password under the wrong user', async () => {
+    const response = await request({ DASHBOARD_PASSWORD: PASSWORD }, basic('root', PASSWORD));
+    expect(response.status).toBe(401);
+  });
+
+  it('honours a custom user name', async () => {
+    const response = await request(
+      { DASHBOARD_PASSWORD: PASSWORD, DASHBOARD_USER: 'matpo' },
+      basic('matpo', PASSWORD),
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it('protects the JSON API, not only the HTML page', async () => {
+    // The API is where the machine-readable portfolio lives; protecting only
+    // the page would be theatre.
+    for (const path of ['/api/state', '/api/portfolio', '/api/orders', '/api/health']) {
+      const response = await request({ DASHBOARD_PASSWORD: PASSWORD }, {}, path);
+      expect(response.status, `${path} was unprotected`).toBe(401);
+    }
+  });
+
+  it('does not reveal which paths exist before authenticating', async () => {
+    // A 404 for unknown paths and a 401 for real ones would map the surface.
+    const response = await request({ DASHBOARD_PASSWORD: PASSWORD }, {}, '/api/does-not-exist');
+    expect(response.status).toBe(401);
+  });
+
+  it('still exposes no endpoint that could place an order', async () => {
+    const response = await request(
+      { DASHBOARD_PASSWORD: PASSWORD },
+      basic('admin', PASSWORD),
+      '/api/order',
+    );
+    expect(response.status).toBe(404);
+  });
+});

@@ -5,6 +5,7 @@ import { redact } from '../../src/core/redact.js';
 import { metrics } from '../../src/monitoring/metrics.js';
 import { renderDashboard, type DashboardData } from '../dashboard/render.js';
 import type { TradingAgent } from '../worker/agent.js';
+import { assertExposureIsSafe, authorise } from './auth.js';
 
 /**
  * Dashboard and monitoring API.
@@ -63,6 +64,11 @@ export function createApiServer(options: ApiServerOptions): Server {
   const { agent, config } = options;
 
   return createServer((req, res) => {
+    // Before anything is read, rendered or serialised.
+    if (!authorise(req, res, { user: config.DASHBOARD_USER, password: config.DASHBOARD_PASSWORD })) {
+      return;
+    }
+
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
 
     const json = (status: number, body: unknown) => {
@@ -115,15 +121,21 @@ export function createApiServer(options: ApiServerOptions): Server {
 }
 
 export async function startApiServer(options: ApiServerOptions): Promise<Server> {
-  const port = options.port ?? 3000;
+  const port = options.port ?? options.config.DASHBOARD_PORT;
   // Loopback by default: portfolio state is not something to publish by
   // accident on a shared network.
-  const host = options.host ?? '127.0.0.1';
+  const host = options.host ?? options.config.DASHBOARD_HOST;
+
+  // Second gate, after the config loader. Both must open, for the same reason
+  // live trading has two: one check is one mistake away.
+  assertExposureIsSafe(host, options.config.DASHBOARD_PASSWORD);
+
   const server = createApiServer(options);
+  const log = options.logger ?? createLogger('api');
 
   await new Promise<void>((resolve) => server.listen(port, host, resolve));
-  (options.logger ?? createLogger('api')).info(
-    { url: `http://${host}:${port}` },
+  log.info(
+    { url: `http://${host}:${port}`, authenticated: Boolean(options.config.DASHBOARD_PASSWORD) },
     'dashboard listening',
   );
   return server;

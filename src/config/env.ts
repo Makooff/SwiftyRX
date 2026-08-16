@@ -115,6 +115,17 @@ const rawSchema = z.object({
   LLM_PROVIDER: z.enum(['anthropic', 'none']).default('none'),
   LLM_MODEL: z.string().default('claude-opus-5'),
 
+  // ---- Dashboard ----------------------------------------------------------
+  DASHBOARD_PORT: num(3000),
+  /**
+   * Bind address. Loopback by default: the dashboard exposes portfolio state,
+   * so reaching it from the network is a deliberate decision, not a default.
+   * Any other value requires DASHBOARD_PASSWORD — see apps/api/auth.ts.
+   */
+  DASHBOARD_HOST: z.string().default('127.0.0.1'),
+  DASHBOARD_USER: z.string().default('admin'),
+  DASHBOARD_PASSWORD: z.string().optional(),
+
   // ---- Ingestion ----------------------------------------------------------
   WATCHLIST: csv(['AAPL', 'MSFT', 'NVDA']),
   INGEST_INTERVAL_SECONDS: num(60),
@@ -194,6 +205,18 @@ function assertSafetyInvariants(cfg: z.infer<typeof rawSchema>): string[] {
   }
   if (cfg.MAX_QUOTE_STALENESS_SECONDS <= 0) {
     problems.push('MAX_QUOTE_STALENESS_SECONDS must be > 0.');
+  }
+
+  // Publishing a live portfolio by forgetting one variable is exactly the
+  // mistake worth failing the boot over.
+  const loopback = ['127.0.0.1', '::1', 'localhost'].includes(cfg.DASHBOARD_HOST);
+  if (!loopback && !cfg.DASHBOARD_PASSWORD) {
+    problems.push(
+      `DASHBOARD_HOST=${cfg.DASHBOARD_HOST} exposes portfolio state to the network and requires DASHBOARD_PASSWORD.`,
+    );
+  }
+  if (cfg.DASHBOARD_PASSWORD !== undefined && cfg.DASHBOARD_PASSWORD.length < 12) {
+    problems.push('DASHBOARD_PASSWORD must be at least 12 characters.');
   }
 
   if (cfg.ENABLE_X_INGESTION) {
