@@ -235,6 +235,9 @@ tax treatment of frequent algorithmic trading may differ from ordinary investing
 ## Extending
 
 [`docs/EXTENDING.md`](docs/EXTENDING.md) covers adding a source, a broker or a strategy.
+[`docs/SPEC_ADAPTATIONS.md`](docs/SPEC_ADAPTATIONS.md) records where this implementation
+departs from the original brief, and why — including the open question of whether a €300
+paper portfolio can produce statistically meaningful results.
 The short version: verify the API before writing code, implement the relevant interface,
 use `HttpClient`, stamp honest freshness metadata, fail loudly, and test against fixtures.
 

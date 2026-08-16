@@ -15,8 +15,17 @@ dependencies. Branches: `main` and `claude/ai-market-agent-xifvq9`.
 
 **Consequence: nothing to preserve, nothing to break.** The instruction "do not break the
 existing project" is satisfied trivially, and the stack could be chosen on merit rather
-than inherited. The repository name (`SwiftyRX`) suggests some earlier intent, but no code
-survives to indicate what it was — worth confirming with you if that name matters.
+than inherited.
+
+The repository name `SwiftyRX` is a leftover from repository creation and carries no
+earlier intent — this is a greenfield project, confirmed by the owner. The package is named
+`ai-market-agent`; renaming the GitHub repository to match is a one-click change in the
+repository settings and is the owner's call, not something this branch should force.
+
+The brief for this project was drafted with an LLM's help and is treated as a specification
+to *adapt*, not to transcribe. Where following it literally would produce a worse or
+internally inconsistent system, the deviation and its reasoning are recorded in
+[`SPEC_ADAPTATIONS.md`](./SPEC_ADAPTATIONS.md).
 
 ## Environment as found
 
