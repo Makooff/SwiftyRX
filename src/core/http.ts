@@ -24,7 +24,7 @@ export interface HttpClientOptions {
 }
 
 export interface RequestOptions {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'DELETE' | 'PATCH';
   query?: Record<string, string | number | boolean | undefined>;
   headers?: Record<string, string>;
   body?: unknown;
@@ -158,6 +158,9 @@ export class HttpClient {
         method: options.method ?? 'GET',
         headers: {
           accept: options.accept === 'text' ? 'text/plain, application/xml, */*' : 'application/json',
+          // Bodies are always JSON-encoded below, so the type is not a caller
+          // decision. Omitting it makes some APIs silently ignore the payload.
+          ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
           ...this.defaultHeaders,
           ...options.headers,
         },

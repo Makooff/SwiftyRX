@@ -5,10 +5,13 @@ releases, macro data and market prices, detects and verifies events, asks Claude
 structured hypothesis about each one, scores that hypothesis against evidence quality, and
 lets an independent Risk Engine decide whether anything is allowed to become an order.
 
-> **Status: Phase 8 of 9.** The full loop works end to end in paper mode: ingest → detect →
-> verify → analyse → score → risk → paper order → portfolio → journal → dashboard.
-> Phase 9 (live trading) is deliberately **not implemented**: `createLiveBroker()` throws.
-> See [Development phases](#development-phases).
+> **Status: all nine phases built.** The loop runs end to end: ingest → detect → verify →
+> analyse → score → risk → order → portfolio → journal → dashboard. A live Alpaca adapter
+> exists behind a multi-part gate that is **off by default and never opens on its own**.
+>
+> Built is not the same as proven. No adapter here has ever been executed against its live
+> API, and no strategy has been backtested on real market data. See
+> [Known limitations](#known-limitations) before connecting anything.
 
 > **No real money is at risk.** The system defaults to `MODE=paper` with `LIVE_TRADING=false`,
 > and live trading requires an explicit, multi-part configuration that the process validates
@@ -375,11 +378,19 @@ observes, it does not act.
 
 ## Going live
 
-**Not implemented.** `createLiveBroker()` throws by design; there is no live order path in
-this repository. Enabling it is a deliberate act of writing code, not of flipping a flag,
-and it should not happen until paper results have been evaluated honestly.
+An Alpaca adapter exists and speaks both endpoints:
 
-When a live broker is implemented, `assertLiveTradingAllowed()` already requires **all** of:
+| Endpoint | Base URL | Money | Gate |
+|---|---|---|---|
+| `paper` | `paper-api.alpaca.markets` | None | API keys only |
+| `live` | `api.alpaca.markets` | **Real** | Full live configuration below |
+
+**Use the paper endpoint first.** It is the same API and the same code with nothing at
+stake, and it is the only honest way to find out whether the request shapes in this
+repository are correct — see [Known limitations](#known-limitations), because they have
+never been sent to Alpaca from here.
+
+Live requires **all** of:
 
 ```bash
 MODE=live
@@ -389,10 +400,28 @@ LIVE_TRADING_CONFIRMATION=I_UNDERSTAND_REAL_MONEY_RISK
 ALLOWED_ASSETS=AAPL,MSFT          # non-empty
 ```
 
-plus risk limits within sane bounds. Any missing piece aborts startup. Even then, the
-`BrokerAdapter` interface exposes only `getAccount`, `getPositions`, `getQuote`,
-`placeOrder`, `cancelOrder` and `getOrderStatus` — the bot cannot move money, because there
+plus risk limits within sane bounds. Any missing piece aborts startup, and the gate is
+checked twice: once by the config loader, once by the adapter constructor.
+
+Even then, the `BrokerAdapter` interface exposes only `getAccount`, `getPositions`,
+`getQuote`, `placeOrder`, `cancelOrder` and `getOrderStatus`. Alpaca's API has endpoints for
+transfers, ACH relationships and account configuration; none is reachable from this code,
+and a test asserts the adapter has no such method. The bot cannot move money because there
 is no method through which to do so.
+
+Three further properties of the live path:
+
+- The asset allowlist is enforced **in the adapter**, not only in the Risk Engine. A symbol
+  outside it is refused before any request leaves the process.
+- Order submission is **never retried automatically**. A timeout does not mean the order was
+  rejected, and a blind retry is how one decision becomes two positions. Every order carries
+  a `client_order_id`, which Alpaca rejects on duplicate — so a *deliberate* retry is safe.
+- Orders are `time_in_force: day`. An order that outlives the session it was reasoned about
+  is an order nobody decided to place today.
+
+**Do not enable live trading because the code exists.** It has never been run against
+Alpaca, and no strategy in this repository has been backtested on real market data. Those
+are two separate reasons to wait, and neither is fixed by adding credentials.
 
 ## Known limitations
 
@@ -404,6 +433,10 @@ is no method through which to do so.
   stubbed `messages.create`. The request shape follows current documentation
   (`output_config.format`, no `temperature`), but verify it with a real key before trusting a
   run.
+- **The Alpaca broker adapter has never sent a request to Alpaca.** Endpoints and payloads
+  come from Alpaca's published Trading API documentation and are tested against recorded
+  fixtures. Run it against the `paper` endpoint and read every response before considering
+  the `live` one.
 - **The strategy has not been shown to work.** No backtest in this repository used real
   market data. The numbers you can produce today measure the machinery, not an edge.
 - Alpaca's free feed is IEX-only — a single venue, not the consolidated tape. Volume
@@ -450,7 +483,7 @@ use `HttpClient`, stamp honest freshness metadata, fail loudly, and test against
 | 6 | Backtesting and walk-forward validation | **Done** |
 | 7 | Dashboard and read-only API | **Done** |
 | 8 | Continuous paper trading agent | **Done** |
-| 9 | Live — only after honest evaluation, never automatic | **Deliberately not implemented** |
+| 9 | Live Alpaca adapter behind the safety gate | **Built, unproven, off by default** |
 
 Phase 0 findings: [`docs/PHASE0_AUDIT.md`](docs/PHASE0_AUDIT.md).
 
