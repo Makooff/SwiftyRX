@@ -19,6 +19,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
+      # These emit a Node 20 deprecation warning. The run is unaffected today;
+      # bump both to the current major when you next touch this file.
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
