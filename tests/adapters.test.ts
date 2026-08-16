@@ -374,6 +374,87 @@ describe('AlpacaMarketDataAdapter', () => {
     expect(quote.freshness.feed).toBe('alpaca:iex');
   });
 
+  it('follows pagination instead of silently truncating the range', async () => {
+    // Found against the live API: a five-year request returned exactly 1000
+    // bars and looked complete. Alpaca pages its bar responses, and ignoring
+    // `next_page_token` quietly shortened every backtest built on it.
+    const bar = (day: number) => ({
+      t: `2021-0${(day % 9) + 1}-01T04:00:00Z`,
+      o: 100,
+      h: 101,
+      l: 99,
+      c: 100.5,
+      v: 1_000_000,
+    });
+
+    const fake = createFakeFetch([
+      // Most specific first: `routes.find` takes the first match, and both
+      // routes contain "/bars".
+      {
+        match: 'page_token=PAGE2',
+        body: { symbol: 'AAPL', bars: Array.from({ length: 258 }, (_, i) => bar(i)), next_page_token: null },
+      },
+      {
+        match: '/bars',
+        body: {
+          symbol: 'AAPL',
+          bars: Array.from({ length: 1000 }, (_, i) => bar(i)),
+          next_page_token: 'PAGE2',
+        },
+      },
+    ]);
+
+    const adapter = new AlpacaMarketDataAdapter({
+      apiKeyId: 'key-id-123456',
+      apiSecretKey: 'secret-value-123456',
+      clock: newClock(),
+      fetchImpl: fake.impl,
+    });
+
+    const bars = await adapter.getBars('AAPL', '1Day', { start: new Date('2021-08-16T00:00:00Z') });
+
+    expect(bars).toHaveLength(1258);
+    expect(fake.urls()).toHaveLength(2);
+    expect(fake.urls()[1]).toContain('page_token=PAGE2');
+  });
+
+  it('stops paginating once the caller has the bars it asked for', async () => {
+    const fake = createFakeFetch([
+      {
+        match: '/bars',
+        body: {
+          symbol: 'AAPL',
+          bars: Array.from({ length: 10 }, () => ({
+            t: '2021-01-01T04:00:00Z',
+            o: 1,
+            h: 1,
+            l: 1,
+            c: 1,
+            v: 1,
+          })),
+          next_page_token: 'MORE',
+        },
+      },
+    ]);
+
+    const adapter = new AlpacaMarketDataAdapter({
+      apiKeyId: 'key-id-123456',
+      apiSecretKey: 'secret-value-123456',
+      clock: newClock(),
+      fetchImpl: fake.impl,
+    });
+
+    // A token is offered, but the caller wanted 10. Chasing it anyway would
+    // bill requests for data nobody asked for.
+    const bars = await adapter.getBars('AAPL', '1Day', {
+      start: new Date('2021-01-01T00:00:00Z'),
+      limit: 10,
+    });
+
+    expect(bars).toHaveLength(10);
+    expect(fake.urls()).toHaveLength(1);
+  });
+
   it('does not label the free IEX feed as consolidated real-time data', async () => {
     const fake = createFakeFetch([{ match: '/quotes/latest', body: quoteBody }]);
     const adapter = new AlpacaMarketDataAdapter({

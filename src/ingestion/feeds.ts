@@ -34,14 +34,12 @@ export const OFFICIAL_FEEDS: FeedDefinition[] = [
     jurisdiction: 'EU',
     licenceNote: 'ECB permits reuse with attribution; see ECB copyright notice.',
   },
-  {
-    id: 'ecb_monetary_policy',
-    name: 'European Central Bank — Monetary policy decisions',
-    url: 'https://www.ecb.europa.eu/rss/pressdec.html',
-    tier: 'official',
-    category: 'official',
-    jurisdiction: 'EU',
-  },
+  // `ecb_monetary_policy` (https://www.ecb.europa.eu/rss/pressdec.html) was
+  // removed on 2026-08-16: it returns 404 against the live site. No
+  // replacement URL is listed here because none could be verified — guessing
+  // one would put an invented endpoint in a codebase whose first rule is not
+  // to. `ecb_press` above still carries monetary policy decisions, which the
+  // ECB publishes as press releases, so coverage is not lost.
   {
     id: 'federalreserve_press_monetary',
     name: 'Federal Reserve — Monetary policy press releases',

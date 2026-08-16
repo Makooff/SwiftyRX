@@ -16,6 +16,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "config:check": "tsx scripts/check-config.ts",
+    "doctor": "tsx scripts/doctor.ts",
     "sources:check": "tsx scripts/check-sources.ts",
     "ingest:once": "tsx scripts/ingest-once.ts",
     "events:detect": "tsx scripts/detect-events.ts",

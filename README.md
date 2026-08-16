@@ -89,7 +89,7 @@ apps/
 ├── dashboard/     server-rendered HTML
 └── api/           read-only localhost JSON API
 scripts/           CLI entry points
-tests/             266 tests, zero network access
+tests/             285 tests, zero network access
 docs/              audit, API research, architecture, risks, spec adaptations
 ```
 
@@ -102,9 +102,10 @@ git clone <this repo>
 cd ai-market-agent
 npm install
 cp .env.example .env      # works as-is; no credentials needed to start
-npm test                  # 266 tests, no network required
+npm test                  # 285 tests, no network required
+npm run doctor            # what works, what doesn't, and what to do — start here
 npm run config:check      # shows the effective safety posture
-npm run sources:check     # probes every configured data source — start here
+npm run sources:check     # probes every configured data source
 npm run backtest -- --fixture   # a full backtest with no API keys
 npm run paper             # paper trading loop + dashboard on :3000
 ```
@@ -124,6 +125,7 @@ docker compose up -d      # PostgreSQL + Redis
 | `npm run paper` | Full paper-trading agent + dashboard, resuming saved state. `-- --once`, `-- --no-server`, `-- --fresh` |
 | `npm run backtest` | Historical backtest. `-- --symbol NVDA --years 5 --walk-forward --benner --fixture` |
 | `npm run dashboard` | Dashboard only, against a fresh agent state |
+| `npm run doctor` | What works, what is degraded, what blocks trading — with the fix and the URL for each. Exits non-zero only when something blocks trading |
 | `npm run config:check` | Effective configuration and safety posture; never prints secrets |
 | `npm run sources:check` | Live health probe of every configured source; non-zero exit if any is broken |
 | `npm run ingest:once` | Single ingestion cycle with a summary |
