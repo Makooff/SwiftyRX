@@ -53,7 +53,7 @@ Worked examples: `src/ingestion/macro/ecb.ts` (no credentials, CSV),
 `src/ingestion/market_data/alpaca.ts` (header auth, JSON),
 `src/ingestion/social/x.ts` (metered, budget-capped, low-trust).
 
-## Adding an entity or a classification rule (Phase 2)
+## Adding an entity or a classification rule
 
 **A company, country or institution** — add an entry to
 `src/intelligence/entity_resolution/registry.ts`:
@@ -85,7 +85,7 @@ only suggests what a sentence is about. Every rule needs an `id`, because it app
 **A new event type** — extend `EventType` and give it an entry in
 `EVENT_TYPE_MATERIALITY`. TypeScript will point out every table needing an update.
 
-## Adding a new broker (Phase 5+)
+## Adding a new broker
 
 Brokers implement:
 
@@ -111,29 +111,77 @@ Non-negotiable constraints:
   responsibility as well as a risk-engine one.
 - Broker rejections must surface as typed errors, not silent failures.
 
-## Adding a new strategy (Phase 3+)
+## Adding a new LLM provider
 
-Strategies produce *signals*, never orders. A signal is a proposal; the Risk Engine decides.
+Implement `LLMProvider` from `src/intelligence/llm/types.ts`:
 
 ```ts
-interface Strategy {
+interface LLMProvider {
   readonly id: string;
-  evaluate(context: MarketContext): Promise<Signal[]>;
+  readonly model: string;
+  isConfigured(): boolean;
+  analyze<T>(options: AnalyzeOptions): Promise<StructuredResult<T>>;
+  health(): Promise<{ state: 'healthy' | 'degraded' | 'unavailable' | 'disabled'; detail?: string }>;
 }
 ```
+
+Rules that are not optional:
+
+- **Never put a credential in a prompt.** `AnalyzeOptions` carries `system`, `task` and
+  `untrustedContent`; none of them should ever be built from configuration secrets.
+- **Constrain the output at the API if the provider supports it, and validate it again
+  locally regardless.** `analyze` returns raw parsed JSON; the caller applies the Zod schema.
+- **A refusal is not an answer.** Return `refused: true` rather than fabricating a neutral
+  verdict — the generator treats a refusal as "no signal", which is the safe reading.
+- **Report usage.** Input/output tokens and, where pricing is known, an estimated cost. A
+  provider that hides its cost cannot be budgeted.
+- Do not probe the provider in `health()` if probing bills tokens. Report configuration
+  state and say that is what you are reporting.
+
+`src/intelligence/llm/anthropic.ts` is the worked example; `null.ts` shows the "no provider
+configured" case, which throws rather than returning a placeholder verdict.
+
+## Adding a new signal strategy
+
+Signal strategies produce *signals*, never orders. A signal is a proposal; the Risk Engine
+decides. See `src/strategy/signals/generator.ts`.
 
 Requirements:
 
 - Return `HOLD` when uncertain. Uncertainty is a valid, and usually correct, output.
 - Cite sources on every signal. A signal without traceable sources cannot be audited later.
 - Never read the wall clock — use the injected `Clock`, or backtests will leak the future.
+- Add your factor to `scoreSignal` as a bounded term with an explicit weight rather than as
+  a special case, so it stays visible in the score breakdown and subject to the vetoes.
 - Every new strategy must be walk-forward tested before it is allowed to influence a paper
   portfolio, and its results must be reported net of costs and slippage.
 
+## Adding a backtest strategy
+
+```ts
+interface BacktestStrategy {
+  readonly id: string;
+  readonly warmupBars: number;   // bars needed before the first decision
+  decide(context: StrategyContext): StrategyDecision;
+}
+```
+
+`StrategyContext.history` contains bars up to and including today and never the future; the
+engine fills at the next bar's open. Two rules follow:
+
+- **Only read `context.history` and `context.today`.** Reaching for the full bar array, or
+  for `Date.now()`, reintroduces look-ahead — the property the engine exists to guarantee.
+- **Set `warmupBars` honestly**, and compare against a buy & hold baseline using the *same*
+  warm-up. A strategy that starts trading 50 bars later than its baseline is being compared
+  over a different period, which is how a losing strategy comes to look like a winner.
+
+Worked examples: `src/backtesting/strategies.ts`.
+
 ### On the Benner cycle specifically
 
-It is planned as an *experimental, configurable-weight* feature, tested as
-`strategy WITHOUT benner` versus `strategy WITH benner` out of sample. If it does not
-improve out-of-sample results, its weight goes to zero and it stays there. A 19th-century
-commodity-price cycle predicting 21st-century equities is an extraordinary claim; treat it
-as a hypothesis to falsify, never as a prior to build on.
+`src/strategy/signals/benner.ts` implements the cycle as an *experimental,
+configurable-weight* overlay that is **off by default**. `npm run backtest -- --benner` runs
+the same strategy with and without the tilt on the same bars so the difference is measured
+rather than assumed. If it does not improve out-of-sample results, its weight goes to zero
+and stays there. A 19th-century commodity-price cycle predicting 21st-century equities is an
+extraordinary claim; treat it as a hypothesis to falsify, never as a prior to build on.

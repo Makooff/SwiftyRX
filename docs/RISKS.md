@@ -6,12 +6,17 @@ Written to be read before, not after, you risk money.
 
 ### The strategy has not been shown to work, and may not
 
-No backtest has been run. No signal has been generated. Nothing in this repository
-constitutes evidence that any strategy built on it is profitable. The correct prior for a
-retail news-reaction strategy is that it does **not** produce an edge after costs, because
-the information is public and the participants who trade it fastest have infrastructure you
-do not. Phase 6 exists to test that honestly, including the possibility that the answer is
-"no edge — stop here".
+The backtester runs, but no backtest in this repository has used real market data — the
+build environment has no network access to any price API, so every run to date used
+synthetic fixture bars. Those runs test the engine, not a strategy. Nothing here
+constitutes evidence that anything built on it is profitable.
+
+The correct prior for a retail news-reaction strategy is that it does **not** produce an
+edge after costs, because the information is public and the participants who trade it
+fastest have infrastructure you do not. The backtester exists to test that honestly,
+including the possibility that the answer is "no edge — stop here", and it prints a Sharpe
+t-statistic and a low-trade-count warning precisely so that a lucky nine-trade run cannot be
+mistaken for a result.
 
 ### €300 is dominated by transaction costs
 
@@ -71,8 +76,8 @@ X reads are billed per post. Polling 5 accounts each minute at 20 posts is rough
 144,000 reads/day — about $720/day at published rates. Mitigations: X is disabled by
 default, `X_MAX_POSTS_READ_PER_DAY` defaults to 0, and the adapter stops when the budget is
 spent. **The budget is enforced per process.** Running two instances doubles the spend, and
-a restart resets the counter — the daily budget lives in memory today, and moving it to
-Redis is a Phase 2 item. Set a spending cap in the X developer console too; do not rely on
+a restart resets the counter — the daily budget lives in memory, and moving it to Redis is
+still open. Set a spending cap in the X developer console too; do not rely on
 this code alone to protect your card.
 
 ### Licence violation
@@ -87,8 +92,9 @@ This is a legal exposure that no code change resolves — check the terms for yo
 
 There is no code path in this repository — and there must never be one — to withdraw funds,
 transfer money, change bank details, open an account, or move assets off the trading
-account. The broker interface arriving in Phase 5 is deliberately limited to
+account. The `BrokerAdapter` interface is deliberately limited to
 `getAccount`, `getPositions`, `getQuote`, `placeOrder`, `cancelOrder`, `getOrderStatus`.
+`createLiveBroker()` throws: there is no live implementation of even that limited interface.
 When you create live API keys, grant trading permissions only; if the broker offers
 withdrawal scopes, do not enable them. Defence in depth: the code refuses, and the
 credentials should not permit it either.
@@ -98,13 +104,23 @@ credentials should not permit it either.
 Secrets live in environment variables and are scrubbed from logs by `core/redact.ts`.
 `.env` is gitignored. Rotate any key that has ever appeared in a terminal you have shared.
 
-### Prompt injection (Phase 3 exposure, not yet live)
+### Prompt injection
 
-Ingested documents are attacker-influenced text. A press release, a news headline, or a
-post can contain instructions aimed at the model that will read it. When Phase 3 lands,
-document content must be passed as data, never as instructions, and the model's output must
-be schema-validated rather than trusted — and the Risk Engine's independence is the last
-line of defence, since it does not read model output at all.
+Ingested documents are attacker-influenced text. A press release, a news headline or a post
+can contain instructions aimed at the model that will read it. Four layers apply:
+
+1. Document content is fenced in `<untrusted_document>` blocks, with embedded fence markers
+   stripped so the fence cannot be closed from inside.
+2. The system prompt is the only instruction channel, and states that fenced content is data
+   to analyse rather than instructions to follow.
+3. Output is schema-constrained at the API and re-validated with Zod; injected prose that
+   does not match the schema produces no signal.
+4. The Risk Engine reads a single number and never the model's text, so a successful
+   injection still cannot bypass the allowlist, the sizing rules or the exposure caps.
+
+None of this is a proof. Treat it as depth, not immunity — and note that the allowlist is
+what makes an injection bounded: an order can only ever target an asset you explicitly
+authorised.
 
 ### Compromised or fake accounts
 

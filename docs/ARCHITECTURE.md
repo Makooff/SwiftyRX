@@ -5,19 +5,19 @@
 ```
 DATA SOURCES
      ↓
-INGESTION            ← Phase 1 (built)
+INGESTION            ← Phase 1
      ↓
-NORMALISATION        ← Phase 1 (built)
+NORMALISATION        ← Phase 1
      ↓
-DEDUPLICATION        ← Phase 1 (built)
+DEDUPLICATION        ← Phase 1
      ↓
-EVENT DETECTION      ← Phase 2 (built)
+EVENT DETECTION      ← Phase 2
      ↓
-SOURCE VERIFICATION  ← Phase 2 (built)
+SOURCE VERIFICATION  ← Phase 2
      ↓
-MARKET CONTEXT       ← Phase 2/3
+MARKET CONTEXT       ← Phase 3
      ↓
-LLM ANALYSIS         ← Phase 3
+LLM ANALYSIS         ← Phase 3   (produces a hypothesis, not a decision)
      ↓
 SIGNAL SCORING       ← Phase 3
      ↓
@@ -27,8 +27,12 @@ PAPER ORDER          ← Phase 5
      ↓
 PORTFOLIO            ← Phase 5
      ↓
+DECISION JOURNAL     ← Phase 5
+     ↓
 MONITORING           ← Phase 7
 ```
+
+All of it is built and runs in `apps/worker/agent.ts`. The live broker (Phase 9) is not.
 
 Each stage may only *reduce* conviction. An event with weak sourcing cannot become a
 high-confidence signal because a model wrote persuasive prose about it, and a
@@ -132,7 +136,30 @@ the operator deserves to see.
 | `intelligence/event_detector/clustering.ts` | Documents → one event per real-world occurrence |
 | `intelligence/verification/verifier.ts` | Reliability → corroboration → official → confidence |
 | `intelligence/verification/market-reaction.ts` | Post-publication price/volume move (weak evidence) |
-| `intelligence/pipeline.ts` | Orchestration, event store, Phase 3 gate |
+| `intelligence/pipeline.ts` | Orchestration, event store, analysis gate |
+| `intelligence/llm/types.ts` | `LLMProvider` interface, structured result, typed failures |
+| `intelligence/llm/prompt.ts` | System prompt, untrusted-content fencing, task construction |
+| `intelligence/llm/anthropic.ts` | Anthropic Messages API with schema-constrained output |
+| `intelligence/llm/null.ts` | The "no provider" case — throws rather than inventing a verdict |
+| `strategy/signals/types.ts` | Hypothesis schema (Zod + JSON Schema), `Signal` |
+| `strategy/signals/generator.ts` | Event + context → prompt → validated hypothesis → signal |
+| `strategy/signals/benner.ts` | Experimental Benner-cycle overlay, off by default |
+| `strategy/scoring/scorer.ts` | Weighted evidence sum plus multiplicative vetoes |
+| `strategy/regime.ts` | Trend/volatility regime from price history |
+| `risk/engine.ts` | Halting conditions and per-order checks; unconditional veto |
+| `risk/position-sizing.ts` | Risk budget ÷ stop distance → quantity |
+| `execution/broker/types.ts` | `BrokerAdapter` — six read/trade methods, no money movement |
+| `execution/costs.ts` | Commission, half-spread and slippage; one model for paper and backtest |
+| `execution/paper/portfolio.ts` | Cash, positions, realised/unrealised P&L, drawdown |
+| `execution/paper/paper-broker.ts` | Simulated fills against the cost model |
+| `execution/live/live-broker.ts` | Live gate; `createLiveBroker()` throws by design |
+| `backtesting/engine.ts` | Decide on bar *i*, fill on bar *i+1* open |
+| `backtesting/metrics.ts` | Return, volatility, Sharpe, Sortino, drawdown, profit factor, t-stat |
+| `backtesting/walk-forward.ts` | Rolling train/test windows with carried capital |
+| `database/decision-journal.ts` | Append-only JSONL; every decision, traded or not |
+| `apps/worker/agent.ts` | The cycle: mark → ingest → detect → analyse → score → risk → execute |
+| `apps/dashboard/render.ts` | Server-rendered HTML; no build step, no external assets |
+| `apps/api/server.ts` | Read-only JSON on 127.0.0.1, redacted |
 
 ## Concurrency and failure isolation
 
@@ -159,15 +186,40 @@ entities with even when its own type does not match, because "X denies the repor
 none of the vocabulary that classified the claim, and filing it separately would leave the
 refuted claim looking unchallenged.
 
-## What Phases 1–2 deliberately do not do
+## Where the LLM sits, and what it is not allowed to be
 
-- No sentiment scoring (see docs/SPEC_ADAPTATIONS.md §8)
-- No LLM calls of any kind
-- No signals, direction, sizing, or portfolio state
-- No broker connection, paper or live
-- No persistence — everything is in memory
-- No dashboard
+The model is asked one question — *what does this event mean for this asset?* — and answers
+in a fixed schema. It never sees the portfolio, cash balance, open positions, exposure or
+risk limits, so it cannot size a trade even by accident. Its confidence enters scoring with a
+weight capped at 0.16 and is subject to the same vetoes as every other term.
 
-`npm run paper` and `npm run backtest` exist as commands and **refuse to run**. A stub
-printing a plausible P&L, or a backtest metric nobody computed, would be the most dangerous
-artefact this project could produce.
+Three defences apply to the request itself:
+
+- **Untrusted text is fenced.** Document content goes inside `<untrusted_document>` blocks
+  with any embedded fence markers stripped, and the system prompt states that content inside
+  them is data to analyse, never instructions to follow.
+- **Output is schema-constrained then re-validated.** The API is asked for JSON matching a
+  schema, and the response is parsed with Zod before anything reads it. A malformed response
+  raises `LLMSchemaError` and produces no signal.
+- **A refusal is not a verdict.** `stop_reason: "refusal"` returns `refused: true`, which the
+  generator treats as "no analysis" — never as HOLD, and never as bearish.
+
+## Execution and cost realism
+
+`execution/costs.ts` is used by both the paper broker and the backtester, so a strategy
+cannot look better in simulation than it would in paper for want of a fee. Default model:
+€1 commission per order, 2.5 bps half-spread, 2.5 bps slippage, applied to every fill.
+
+The backtester decides on bar *i* and fills at the open of bar *i+1*. This is the single
+most important structural property of the engine: a close-to-close fill on the bar that
+generated the signal is a look-ahead bug that produces beautiful, fictional equity curves.
+
+## What is still deliberately absent
+
+- No live broker. `createLiveBroker()` throws; there is no live order path to review.
+- No database. Agent state is in memory; the decision journal is an append-only file.
+- No withdrawal, transfer, account-opening or bank-detail method anywhere, at any layer.
+- No open-world entity recognition, and no estimated correlation matrix — both are curated
+  lists, and their limits are stated rather than papered over.
+- No claim that any of this is profitable. Nothing here has been run against real market
+  data or a real API.

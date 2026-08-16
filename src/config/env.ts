@@ -110,10 +110,10 @@ const rawSchema = z.object({
   X_MAX_POSTS_READ_PER_DAY: num(0),
   X_WATCHED_ACCOUNTS: csv([]),
 
-  // ---- LLM (wired in Phase 3) ---------------------------------------------
+  // ---- LLM ----------------------------------------------------------------
   ANTHROPIC_API_KEY: z.string().optional(),
   LLM_PROVIDER: z.enum(['anthropic', 'none']).default('none'),
-  LLM_MODEL: z.string().default('claude-sonnet-4-5'),
+  LLM_MODEL: z.string().default('claude-opus-5'),
 
   // ---- Ingestion ----------------------------------------------------------
   WATCHLIST: csv(['AAPL', 'MSFT', 'NVDA']),

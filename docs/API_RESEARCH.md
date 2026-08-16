@@ -28,6 +28,7 @@ capability could not be confirmed, it is marked **unverified** rather than assum
 | Finnhub | Yes | 60 calls/min | 60 calls/min | **No — personal use only** | Yes |
 | Alpha Vantage | Yes | 25 req/**day** | 5 req/min, 25/day | Paid plan required | Yes |
 | X (Twitter) | Yes | **None for new devs** | Pay-per-read | Per X agreement | Yes, billed |
+| Anthropic | Yes | No | Tier-dependent | Yes | Yes |
 
 ---
 
@@ -101,7 +102,9 @@ often than APIs are.
   `delayed_other`, never `realtime`.
 - **Endpoints used:** `GET /v2/stocks/{symbol}/quotes/latest`, `GET /v2/stocks/{symbol}/bars`.
   Auth via `APCA-API-KEY-ID` / `APCA-API-SECRET-KEY` headers.
-- **Paper trading base URL:** `https://paper-api.alpaca.markets` (used in Phase 5, not yet).
+- **Paper trading base URL:** `https://paper-api.alpaca.markets`. Not used: paper trading is
+  simulated locally by `PaperBroker` against the shared cost model, so paper runs need no
+  broker account at all. The URL is recorded here for whoever implements a live adapter.
 
 Sources: [Alpaca countries](https://alpaca.markets/support/countries-alpaca-is-available),
 [Alpaca data plans](https://alpaca.markets/data), [Market data API docs](https://docs.alpaca.markets/us/docs/about-market-data-api)
@@ -188,6 +191,41 @@ is the canonical demonstration of what tweet-to-order automation does when it is
 
 ---
 
+## LLM
+
+### Anthropic Messages API
+
+- **Endpoint:** `POST https://api.anthropic.com/v1/messages`, called through the official
+  `@anthropic-ai/sdk` rather than by hand.
+- **Auth:** `x-api-key` header, supplied by the SDK from `ANTHROPIC_API_KEY`. The key is
+  passed to `registerSecret()` at construction so it is scrubbed from every log line.
+- **Model:** `LLM_MODEL`, default `claude-opus-5`.
+- **Structured output:** requested via `output_config: { format: { type: 'json_schema',
+  schema } }`. The response is still parsed and validated locally with Zod — a
+  schema-constrained response is a strong guarantee, not a reason to skip validation.
+- **Sampling parameters:** none sent. `temperature`, `top_p` and `top_k` are rejected by
+  current models; steering is done through the system prompt.
+- **Refusals:** a request can return HTTP 200 with `stop_reason: "refusal"` and no content.
+  The provider surfaces this as `refused: true`. Reading `content[0]` without checking would
+  throw, or worse, produce a neutral-looking verdict from an absent analysis.
+- **Cost:** usage-based. Published list prices are recorded in `anthropic.ts`
+  (`claude-opus-5`: $5/Mtok input, $25/Mtok output) and used to estimate a per-call cost from
+  the returned token counts. Prices change; treat the table as a local estimate, not an
+  invoice.
+- **Rate limits:** per-account and tier-dependent, not a fixed published number. The agent
+  makes at most one call per detected event, which in practice is far below any tier limit.
+- **Availability from Belgium:** the API is available; no regional restriction was found.
+
+**Not verified against the live API.** The build environment has no outbound access to
+`api.anthropic.com`. The request shape follows current documentation and is tested against a
+stubbed `messages.create`. Verify with a real key before trusting a run.
+
+Sources: [Messages API](https://docs.claude.com/en/api/messages),
+[Structured outputs](https://docs.claude.com/en/docs/build-with-claude/structured-outputs),
+[Pricing](https://claude.com/pricing)
+
+---
+
 ## Deliberately not used
 
 - **Yahoo Finance** — the widely used endpoints are undocumented and unsanctioned. Using
@@ -211,7 +249,7 @@ is the canonical demonstration of what tweet-to-order automation does when it is
 | + Alpaca free | €0 | IEX quotes and bars (single venue) |
 | + Finnhub free | €0 | Real-time US quotes — **non-commercial use only** |
 | + Alpha Vantage free | €0 | 25 requests/day of history |
-| + Claude API (Phase 3) | usage-based | Event analysis |
+| + Claude API | usage-based | One call per detected event, not per document |
 | + X ingestion | ~$0.005/post read | Monitoring of named accounts |
 | + Alpaca SIP data | paid | Consolidated US tape |
 
