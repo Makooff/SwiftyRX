@@ -5,6 +5,11 @@ import { RiskEngine } from '../src/risk/engine.js';
 import { sizePosition, stopDistancePct } from '../src/risk/position-sizing.js';
 import type { PortfolioSnapshot, RiskRequest } from '../src/risk/types.js';
 import { assertLiveTradingAllowed, createLiveBroker, LiveTradingBlockedError } from '../src/execution/live/live-broker.js';
+import { AlpacaBroker } from '../src/execution/live/alpaca-broker.js';
+import { BrokerRejectionError } from '../src/execution/broker/types.js';
+import type { FetchImpl } from '../src/core/http.js';
+import { MarketDataService } from '../src/ingestion/market_data/index.js';
+import { FixtureMarketDataAdapter } from '../src/ingestion/market_data/fixture.js';
 
 /**
  * Risk Engine tests.
@@ -314,16 +319,197 @@ describe('live trading gate', () => {
     }
   });
 
-  it('refuses to build a live broker even when the gate passes', () => {
-    const liveConfig = config({
+  const liveConfig = () =>
+    config({
       MODE: 'live',
       LIVE_TRADING: 'true',
       PAPER_TRADING: 'false',
       LIVE_TRADING_CONFIRMATION: LIVE_CONFIRMATION_PHRASE,
       ALLOWED_ASSETS: 'AAPL',
     });
-    expect(() => assertLiveTradingAllowed(liveConfig)).not.toThrow();
-    // The gate opening is not the same as an implementation existing.
-    expect(() => createLiveBroker(liveConfig)).toThrow(/No live broker is implemented/);
+
+  const marketData = () =>
+    new MarketDataService({
+      providers: [new FixtureMarketDataAdapter({ clock, basePrices: { AAPL: 200 } })],
+      maxStalenessSeconds: 120,
+      clock,
+    });
+
+  it('refuses to build a live broker without credentials, even when the gate passes', () => {
+    expect(() => assertLiveTradingAllowed(liveConfig())).not.toThrow();
+    // The gate opening is necessary, not sufficient.
+    expect(() => createLiveBroker(liveConfig(), { marketData: marketData() })).toThrow(
+      LiveTradingBlockedError,
+    );
+  });
+
+  it('refuses to build a live broker under a paper configuration, credentials or not', () => {
+    expect(() =>
+      createLiveBroker(config({ ALPACA_API_KEY_ID: 'k', ALPACA_API_SECRET_KEY: 's' }), {
+        marketData: marketData(),
+      }),
+    ).toThrow(LiveTradingBlockedError);
+  });
+});
+
+describe('Alpaca broker', () => {
+  const marketData = () =>
+    new MarketDataService({
+      providers: [new FixtureMarketDataAdapter({ clock, basePrices: { AAPL: 200 } })],
+      maxStalenessSeconds: 120,
+      clock,
+    });
+
+  function broker(overrides: Record<string, string> = {}, fetchImpl?: FetchImpl) {
+    return new AlpacaBroker({
+      config: config({ ALLOWED_ASSETS: 'AAPL', ...overrides }),
+      endpoint: 'paper',
+      apiKeyId: 'test-key-id',
+      apiSecretKey: 'test-secret-key',
+      marketData: marketData(),
+      clock,
+      ...(fetchImpl ? { fetchImpl } : {}),
+    });
+  }
+
+  it('exposes no method that could move money out of the account', () => {
+    const surface = broker() as unknown as Record<string, unknown>;
+    for (const forbidden of [
+      'withdraw',
+      'transfer',
+      'createTransfer',
+      'closeAccount',
+      'updateBankDetails',
+      'createAchRelationship',
+      'requestJournal',
+    ]) {
+      expect(surface[forbidden]).toBeUndefined();
+    }
+  });
+
+  it('rejects a symbol outside the allowlist before any request is made', async () => {
+    let called = false;
+    const fetchImpl: FetchImpl = async () => {
+      called = true;
+      return new Response('{}', { status: 200 });
+    };
+
+    await expect(
+      broker({}, fetchImpl).placeOrder({
+        symbol: 'TSLA',
+        side: 'buy',
+        quantity: 1,
+        type: 'market',
+        clientOrderId: 'o-1',
+      }),
+    ).rejects.toThrow(BrokerRejectionError);
+
+    // The point is that nothing reached the broker at all.
+    expect(called).toBe(false);
+  });
+
+  it('marks the paper endpoint as paper', () => {
+    expect(broker().isPaper).toBe(true);
+  });
+
+  it('refuses a live endpoint under a paper configuration', () => {
+    expect(
+      () =>
+        new AlpacaBroker({
+          config: config({ ALLOWED_ASSETS: 'AAPL' }),
+          endpoint: 'live',
+          apiKeyId: 'k',
+          apiSecretKey: 's',
+          marketData: marketData(),
+          clock,
+        }),
+    ).toThrow(LiveTradingBlockedError);
+  });
+
+  it('sends credentials in headers and never in the URL', async () => {
+    let seenUrl = '';
+    let seenHeaders: Record<string, string> = {};
+    const fetchImpl: FetchImpl = async (url, init) => {
+      seenUrl = url;
+      seenHeaders = (init?.headers ?? {}) as Record<string, string>;
+      return new Response(JSON.stringify({ cash: '1000', currency: 'USD', equity: '1200', status: 'ACTIVE' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    await broker({}, fetchImpl).getAccount();
+
+    expect(seenUrl).not.toContain('test-secret-key');
+    expect(seenHeaders['APCA-API-SECRET-KEY']).toBe('test-secret-key');
+  });
+
+  it('carries the client order id so a retry cannot become a second position', async () => {
+    let body: Record<string, unknown> = {};
+    const fetchImpl: FetchImpl = async (_url, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          id: 'srv-1',
+          client_order_id: 'o-42',
+          symbol: 'AAPL',
+          side: 'buy',
+          type: 'market',
+          qty: '3',
+          filled_qty: '0',
+          status: 'accepted',
+          submitted_at: '2026-08-16T12:00:00Z',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+
+    const order = await broker({}, fetchImpl).placeOrder({
+      symbol: 'AAPL',
+      side: 'buy',
+      quantity: 3,
+      type: 'market',
+      clientOrderId: 'o-42',
+    });
+
+    expect(body.client_order_id).toBe('o-42');
+    expect(body.time_in_force).toBe('day');
+    expect(order.status).toBe('pending');
+  });
+
+  it('reads an unknown broker status as pending, never as filled', async () => {
+    const fetchImpl: FetchImpl = async () =>
+      new Response(
+        JSON.stringify({
+          id: 'srv-2',
+          client_order_id: 'o-43',
+          symbol: 'AAPL',
+          side: 'buy',
+          type: 'market',
+          qty: '1',
+          status: 'some_state_alpaca_added_later',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+
+    expect((await broker({}, fetchImpl).getOrderStatus('srv-2')).status).toBe('pending');
+  });
+
+  it('refuses to sell more than it holds while short selling is off', async () => {
+    const fetchImpl: FetchImpl = async () =>
+      new Response(JSON.stringify([{ symbol: 'AAPL', qty: '2', avg_entry_price: '200' }]), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+
+    await expect(
+      broker({}, fetchImpl).placeOrder({
+        symbol: 'AAPL',
+        side: 'sell',
+        quantity: 5,
+        type: 'market',
+        clientOrderId: 'o-44',
+      }),
+    ).rejects.toThrow(/short/i);
   });
 });

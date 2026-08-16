@@ -1,21 +1,25 @@
 import type { AppConfig } from '../../config/env.js';
+import type { Logger } from '../../core/logger.js';
+import type { MarketDataService } from '../../ingestion/market_data/index.js';
 import type { BrokerAdapter } from '../broker/types.js';
+import { AlpacaBroker } from './alpaca-broker.js';
 
 /**
  * Live broker gate.
  *
- * There is no live broker implementation in this repository, and this file is
- * the reason a future one cannot be switched on casually. Any live adapter must
- * be constructed through `assertLiveTradingAllowed`, which throws unless every
- * safety condition holds.
+ * This file is the reason live trading cannot be switched on casually. Every
+ * live adapter is constructed through `assertLiveTradingAllowed`, which throws
+ * unless every safety condition holds.
  *
- * Phase 9 is not implemented. When it is, the implementation must:
- *  - expose only the six BrokerAdapter methods — no withdrawal, no transfer,
- *    no account management, whatever the vendor SDK offers;
- *  - reject any symbol outside ALLOWED_ASSETS at the adapter boundary, not
+ * The adapter behind it satisfies the constraints this file has always
+ * specified:
+ *  - only the six BrokerAdapter methods — no withdrawal, no transfer, no
+ *    account management, whatever the vendor API offers;
+ *  - any symbol outside ALLOWED_ASSETS is rejected at the adapter boundary, not
  *    only in the Risk Engine;
- *  - use API credentials provisioned with trading permission only;
- *  - carry an idempotency key on every order.
+ *  - credentials must be provisioned with trading permission only;
+ *  - every order carries an idempotency key, and order submission is never
+ *    retried automatically.
  */
 
 export class LiveTradingBlockedError extends Error {
@@ -49,15 +53,62 @@ export function assertLiveTradingAllowed(config: AppConfig): void {
 }
 
 /**
- * Placeholder factory. Deliberately throws.
+ * Build the live broker.
  *
- * Returning a working live adapter from an unfinished, untested implementation
- * would be the single most dangerous thing this codebase could do.
+ * Reaching this function at all requires `MODE=live`, `LIVE_TRADING=true`,
+ * `PAPER_TRADING=false`, the confirmation phrase and a non-empty allowlist —
+ * checked once by the config loader at startup and again here. Nothing about
+ * this path is reachable by default, and no code calls it on its own: the paper
+ * entry point refuses live mode outright.
+ *
+ * The adapter itself is untested against the live API. Prove it on the Alpaca
+ * paper endpoint first (`createAlpacaPaperBroker`), which speaks the same API
+ * with no money behind it.
  */
-export function createLiveBroker(config: AppConfig): BrokerAdapter {
+export function createLiveBroker(
+  config: AppConfig,
+  deps: { marketData: MarketDataService; logger?: Logger },
+): BrokerAdapter {
   assertLiveTradingAllowed(config);
-  throw new Error(
-    'No live broker is implemented. Phase 9 requires a validated adapter, confirmed broker ' +
-      'eligibility for your jurisdiction, and evidence from paper trading that the strategy works.',
-  );
+
+  if (!config.ALPACA_API_KEY_ID || !config.ALPACA_API_SECRET_KEY) {
+    throw new LiveTradingBlockedError([
+      'ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY are required for live trading',
+    ]);
+  }
+
+  return new AlpacaBroker({
+    config,
+    endpoint: 'live',
+    apiKeyId: config.ALPACA_API_KEY_ID,
+    apiSecretKey: config.ALPACA_API_SECRET_KEY,
+    marketData: deps.marketData,
+    ...(deps.logger ? { logger: deps.logger } : {}),
+  });
+}
+
+/**
+ * The Alpaca *paper* endpoint: the real API, no real money.
+ *
+ * This is the step between local simulation and live trading, and the only
+ * honest way to find out whether the adapter's request shapes are right. It
+ * needs no live gate because it cannot move money — but it still enforces the
+ * asset allowlist, so what you prove here is what will run later.
+ */
+export function createAlpacaPaperBroker(
+  config: AppConfig,
+  deps: { marketData: MarketDataService; logger?: Logger },
+): BrokerAdapter {
+  if (!config.ALPACA_API_KEY_ID || !config.ALPACA_API_SECRET_KEY) {
+    throw new Error('ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY are required');
+  }
+
+  return new AlpacaBroker({
+    config,
+    endpoint: 'paper',
+    apiKeyId: config.ALPACA_API_KEY_ID,
+    apiSecretKey: config.ALPACA_API_SECRET_KEY,
+    marketData: deps.marketData,
+    ...(deps.logger ? { logger: deps.logger } : {}),
+  });
 }
