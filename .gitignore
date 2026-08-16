@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# Secrets — never commit real credentials
+.env
+.env.*
+!.env.example
+
+# Local runtime state
+data/
+.tmp/
+.DS_Store

@@ -1,0 +1,302 @@
+import type { HealthReport } from '../../src/domain/types.js';
+import type { Order } from '../../src/execution/broker/types.js';
+import type { MarketEvent } from '../../src/intelligence/types.js';
+import type { Signal } from '../../src/strategy/signals/types.js';
+import type { AgentState } from '../worker/agent.js';
+
+/**
+ * Server-rendered dashboard.
+ *
+ * One HTML file, no build step, no client framework. The operator needs to see
+ * portfolio, signals, events, orders and system health — none of which needs a
+ * SPA, and all of which needs to still work when something is broken.
+ *
+ * On the AI reasoning panel: it shows the model's *summary*, the factors that
+ * fed the score, the sources and the stated uncertainties. It does not show
+ * chain-of-thought, and there is none to show — the API is not asked for
+ * reasoning content.
+ */
+
+export interface DashboardData {
+  mode: string;
+  paperTrading: boolean;
+  liveTrading: boolean;
+  currency: string;
+  portfolio: {
+    initialCapital: number;
+    totalValue: number;
+    cash: number;
+    totalReturnPct: number;
+    drawdownPct: number;
+    maxDrawdownPct: number;
+    exposurePct: number;
+    positions: Array<{
+      symbol: string;
+      quantity: number;
+      averagePrice: number;
+      marketValue: number;
+      unrealisedPnl: number;
+    }>;
+  };
+  signals: Signal[];
+  events: MarketEvent[];
+  orders: Order[];
+  health: HealthReport[];
+  agent: AgentState;
+  llmProvider: string;
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function pnlClass(value: number): string {
+  return value > 0 ? 'pos' : value < 0 ? 'neg' : '';
+}
+
+const STYLES = `
+:root {
+  --bg: #0e1116; --panel: #161b22; --border: #2a313a; --text: #d5dae1;
+  --muted: #8b949e; --pos: #3fb950; --neg: #f85149; --warn: #d29922; --accent: #58a6ff;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 16px 24px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.badge { padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--border); }
+.badge.paper { background: #1f2d3d; color: var(--accent); border-color: #2b4a6f; }
+.badge.live { background: #4a1d1d; color: var(--neg); border-color: #6f2b2b; }
+main { padding: 24px; display: grid; gap: 20px; max-width: 1500px; }
+.grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); margin: 0 0 14px; font-weight: 600; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; }
+.stat .label { color: var(--muted); font-size: 12px; }
+.stat .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px;
+  padding: 6px 8px; border-bottom: 1px solid var(--border); }
+td { padding: 7px 8px; border-bottom: 1px solid #1d232b; vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+.muted { color: var(--muted); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+details { margin-top: 8px; }
+summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+.factors { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip { background: #1d232b; border: 1px solid var(--border); border-radius: 6px;
+  padding: 2px 8px; font-size: 11px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.dot.healthy { background: var(--pos); } .dot.degraded { background: var(--warn); }
+.dot.unavailable { background: var(--neg); } .dot.disabled { background: #4a5158; }
+ul { margin: 6px 0 0; padding-left: 18px; }
+.notice { border-left: 3px solid var(--warn); padding: 8px 12px; background: #21201a;
+  border-radius: 4px; margin-bottom: 14px; }
+`;
+
+export function renderDashboard(data: DashboardData): string {
+  const p = data.portfolio;
+
+  const positionsRows =
+    p.positions.length > 0
+      ? p.positions
+          .map(
+            (pos) => `<tr>
+        <td class="mono">${escapeHtml(pos.symbol)}</td>
+        <td>${pos.quantity}</td>
+        <td>${pos.averagePrice.toFixed(2)}</td>
+        <td>${pos.marketValue.toFixed(2)}</td>
+        <td class="${pnlClass(pos.unrealisedPnl)}">${pos.unrealisedPnl.toFixed(2)}</td>
+      </tr>`,
+          )
+          .join('')
+      : '<tr><td colspan="5" class="empty">No open positions</td></tr>';
+
+  const signalRows =
+    data.signals.length > 0
+      ? data.signals
+          .slice(0, 15)
+          .map(
+            (signal) => `<tr>
+        <td class="mono muted">${escapeHtml(signal.createdAt.slice(11, 19))}</td>
+        <td class="mono">${escapeHtml(signal.asset)}</td>
+        <td><strong>${escapeHtml(signal.action)}</strong></td>
+        <td>${signal.score.toFixed(3)}</td>
+        <td class="muted">${signal.modelConfidence.toFixed(2)}</td>
+        <td>
+          ${escapeHtml(signal.catalyst.slice(0, 90))}
+          <details>
+            <summary>reasoning</summary>
+            <p>${escapeHtml(signal.reason.slice(0, 900))}</p>
+            <p class="muted">Sources: ${escapeHtml(signal.sources.join(', '))}</p>
+            ${
+              signal.uncertainties.length > 0
+                ? `<p class="muted">Uncertainties:</p><ul>${signal.uncertainties
+                    .map((u) => `<li class="muted">${escapeHtml(u)}</li>`)
+                    .join('')}</ul>`
+                : ''
+            }
+            <div class="factors">${signal.components
+              .map(
+                (c) =>
+                  `<span class="chip">${escapeHtml(c.name)} ${c.value} &times; ${c.weight}</span>`,
+              )
+              .join('')}</div>
+            <p class="muted mono">${escapeHtml(signal.provenance.model)} &middot; ${signal.provenance.latencyMs}ms${
+              signal.provenance.estimatedCostUsd !== undefined
+                ? ` &middot; $${signal.provenance.estimatedCostUsd.toFixed(4)}`
+                : ''
+            }</p>
+          </details>
+        </td>
+      </tr>`,
+          )
+          .join('')
+      : '<tr><td colspan="6" class="empty">No signals yet</td></tr>';
+
+  const eventRows =
+    data.events.length > 0
+      ? data.events
+          .slice(0, 15)
+          .map(
+            (event) => `<tr>
+        <td>${escapeHtml(event.type)}</td>
+        <td>${escapeHtml(event.headline.slice(0, 80))}</td>
+        <td>${event.materiality.toFixed(2)}</td>
+        <td class="${event.verification.status === 'contradicted' ? 'neg' : event.verification.status === 'officially_confirmed' ? 'pos' : 'muted'}">${escapeHtml(event.verification.status)}</td>
+        <td class="mono">${escapeHtml(event.tickers.join(', ') || '—')}</td>
+      </tr>`,
+          )
+          .join('')
+      : '<tr><td colspan="5" class="empty">No events detected yet</td></tr>';
+
+  const orderRows =
+    data.orders.length > 0
+      ? data.orders
+          .slice(0, 15)
+          .map(
+            (order) => `<tr>
+        <td class="mono muted">${escapeHtml(order.submittedAt.slice(11, 19))}</td>
+        <td class="mono">${escapeHtml(order.symbol)}</td>
+        <td>${escapeHtml(order.side)}</td>
+        <td>${order.quantity}</td>
+        <td>${order.filledPrice?.toFixed(2) ?? '—'}</td>
+        <td class="${order.status === 'filled' ? 'pos' : order.status === 'rejected' ? 'neg' : 'muted'}">${escapeHtml(order.status)}</td>
+        <td class="muted">${order.commission !== undefined ? `${order.commission.toFixed(2)} + ${order.slippage?.toFixed(2) ?? '0'}` : '—'}</td>
+      </tr>`,
+          )
+          .join('')
+      : '<tr><td colspan="7" class="empty">No orders placed</td></tr>';
+
+  const healthRows =
+    data.health.length > 0
+      ? data.health
+          .map(
+            (report) => `<tr>
+        <td><span class="dot ${report.state}"></span>${escapeHtml(report.adapter)}</td>
+        <td class="muted">${escapeHtml(report.kind)}</td>
+        <td>${escapeHtml(report.state)}</td>
+        <td class="muted">${escapeHtml(report.detail ?? '')}</td>
+      </tr>`,
+          )
+          .join('')
+      : '<tr><td colspan="4" class="empty">Health not yet checked</td></tr>';
+
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Market Agent</title>
+<style>${STYLES}</style>
+<meta http-equiv="refresh" content="15">
+</head><body>
+<header>
+  <h1>AI Market Agent</h1>
+  <span class="badge ${data.liveTrading ? 'live' : 'paper'}">${data.liveTrading ? 'LIVE — REAL MONEY' : `${escapeHtml(data.mode.toUpperCase())} — NO REAL MONEY`}</span>
+  <span class="muted">cycle ${data.agent.cycles} &middot; ${escapeHtml(data.agent.lastCycleAt?.slice(11, 19) ?? 'not run')} &middot; LLM: ${escapeHtml(data.llmProvider)}</span>
+</header>
+<main>
+  ${
+    data.agent.halted
+      ? `<div class="notice"><strong>Trading halted.</strong><ul>${data.agent.haltReasons
+          .map((r) => `<li>${escapeHtml(r)}</li>`)
+          .join('')}</ul></div>`
+      : ''
+  }
+
+  <section>
+    <h2>Portfolio</h2>
+    <div class="stats">
+      <div class="stat"><div class="label">Total value</div><div class="value">${p.totalValue.toFixed(2)} ${escapeHtml(data.currency)}</div></div>
+      <div class="stat"><div class="label">Cash</div><div class="value">${p.cash.toFixed(2)}</div></div>
+      <div class="stat"><div class="label">Return</div><div class="value ${pnlClass(p.totalReturnPct)}">${p.totalReturnPct.toFixed(2)}%</div></div>
+      <div class="stat"><div class="label">Drawdown</div><div class="value ${p.drawdownPct > 0 ? 'neg' : ''}">${p.drawdownPct.toFixed(2)}%</div></div>
+      <div class="stat"><div class="label">Max drawdown</div><div class="value ${p.maxDrawdownPct > 0 ? 'neg' : ''}">${p.maxDrawdownPct.toFixed(2)}%</div></div>
+      <div class="stat"><div class="label">Exposure</div><div class="value">${p.exposurePct.toFixed(1)}%</div></div>
+    </div>
+    <table style="margin-top:16px">
+      <thead><tr><th>Symbol</th><th>Qty</th><th>Avg price</th><th>Value</th><th>Unrealised</th></tr></thead>
+      <tbody>${positionsRows}</tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Signals</h2>
+    <table>
+      <thead><tr><th>Time</th><th>Asset</th><th>Action</th><th>Score</th><th>Model conf.</th><th>Catalyst &amp; reasoning</th></tr></thead>
+      <tbody>${signalRows}</tbody>
+    </table>
+  </section>
+
+  <div class="grid">
+    <section>
+      <h2>Events</h2>
+      <table>
+        <thead><tr><th>Type</th><th>Headline</th><th>Materiality</th><th>Verification</th><th>Tickers</th></tr></thead>
+        <tbody>${eventRows}</tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Orders</h2>
+      <table>
+        <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill</th><th>Status</th><th>Costs</th></tr></thead>
+        <tbody>${orderRows}</tbody>
+      </table>
+    </section>
+  </div>
+
+  <section>
+    <h2>System health</h2>
+    <div class="stats" style="margin-bottom:14px">
+      <div class="stat"><div class="label">Documents</div><div class="value">${data.agent.documentsIngested}</div></div>
+      <div class="stat"><div class="label">Events</div><div class="value">${data.agent.eventsDetected}</div></div>
+      <div class="stat"><div class="label">Signals</div><div class="value">${data.agent.signalsGenerated}</div></div>
+      <div class="stat"><div class="label">Orders</div><div class="value">${data.agent.ordersPlaced}</div></div>
+      <div class="stat"><div class="label">Risk rejections</div><div class="value">${data.agent.ordersRejectedByRisk}</div></div>
+      <div class="stat"><div class="label">Errors</div><div class="value ${data.agent.errors.length > 0 ? 'warn' : ''}">${data.agent.errors.length}</div></div>
+    </div>
+    <table>
+      <thead><tr><th>Source</th><th>Kind</th><th>State</th><th>Detail</th></tr></thead>
+      <tbody>${healthRows}</tbody>
+    </table>
+    ${
+      data.agent.errors.length > 0
+        ? `<details><summary>Recent errors</summary><ul>${data.agent.errors
+            .slice(0, 10)
+            .map((e) => `<li class="muted mono">${escapeHtml(e.at.slice(11, 19))} [${escapeHtml(e.stage)}] ${escapeHtml(e.message)}</li>`)
+            .join('')}</ul></details>`
+        : ''
+    }
+  </section>
+</main>
+</body></html>`;
+}

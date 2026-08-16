@@ -1,0 +1,43 @@
+{
+  "name": "ai-market-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Experimental autonomous market intelligence system. Paper trading only by default.",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "dev": "tsx watch scripts/dev.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "config:check": "tsx scripts/check-config.ts",
+    "sources:check": "tsx scripts/check-sources.ts",
+    "ingest:once": "tsx scripts/ingest-once.ts",
+    "events:detect": "tsx scripts/detect-events.ts",
+    "paper": "tsx scripts/paper.ts",
+    "backtest": "tsx scripts/backtest.ts",
+    "dashboard": "tsx scripts/dashboard.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
+    "fast-xml-parser": "^5.11.0",
+    "pino": "^9.6.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.21.0",
+    "@types/node": "^22.13.5",
+    "eslint": "^9.21.0",
+    "globals": "^15.15.0",
+    "pino-pretty": "^13.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.25.0",
+    "vitest": "^3.0.7"
+  }
+}

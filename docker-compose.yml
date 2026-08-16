@@ -1,0 +1,44 @@
+# Local infrastructure for development.
+#
+# Phase 1 does not require either service — ingestion runs entirely in memory.
+# They are here so Phase 2 (event persistence) and the decision journal have
+# somewhere to land, and so `docker compose up -d` is one step, not a research
+# project.
+#
+# Credentials below are local-development defaults and are deliberately not
+# secret. Production deployments must supply their own via the environment.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: market-agent-postgres
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: market_agent
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U agent -d market_agent']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: market-agent-redis
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

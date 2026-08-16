@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The whole suite runs offline by design — no adapter test may touch the
+# network. If a job here ever needs a secret to pass, that is a bug in the test,
+# not a missing secret.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      # These emit a Node 20 deprecation warning. The run is unaffected today;
+      # bump both to the current major when you next touch this file.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      # Proves the safety gate still holds on a clean checkout: default config
+      # must be paper, with live trading off.
+      - name: Safety posture
+        run: npm run config:check
+
+      # A backtest on synthetic bars needs no credentials and catches a broken
+      # engine that the unit tests might not.
+      - name: Backtest smoke test
+        run: npm run backtest -- --fixture --symbol AAPL --years 2
