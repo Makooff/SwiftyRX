@@ -157,6 +157,7 @@ the operator deserves to see.
 | `backtesting/metrics.ts` | Return, volatility, Sharpe, Sortino, drawdown, profit factor, t-stat |
 | `backtesting/walk-forward.ts` | Rolling train/test windows with carried capital |
 | `database/decision-journal.ts` | Append-only JSONL; every decision, traded or not |
+| `database/agent-state-store.ts` | Portfolio and counters across restarts; refuses a mismatched state |
 | `apps/worker/agent.ts` | The cycle: mark → ingest → detect → analyse → score → risk → execute |
 | `apps/dashboard/render.ts` | Server-rendered HTML; no build step, no external assets |
 | `apps/api/server.ts` | Read-only JSON on 127.0.0.1, redacted |
@@ -204,6 +205,28 @@ Three defences apply to the request itself:
 - **A refusal is not a verdict.** `stop_reason: "refusal"` returns `refused: true`, which the
   generator treats as "no analysis" — never as HOLD, and never as bearish.
 
+## State that outlives a process
+
+`AgentStateStore` checkpoints the portfolio, the counters and the consumed order ids after
+every cycle. The reason is measurement, not convenience: the project's question needs months
+of observations, and a portfolio that resets on restart can never hold more history than its
+longest uptime.
+
+Two rules keep persistence from becoming its own source of fiction:
+
+- **A mismatched state file is refused, never reconciled.** Mode, currency and starting
+  capital form a fingerprint; if any differs, startup fails with an explanation. Adopting
+  numbers from a different experiment would produce a P&L that is arithmetic on unrelated
+  figures. Risk limits are deliberately *not* fingerprinted — tightening a limit should
+  apply to the next decision, not discard the history.
+- **`initialCash` is restored from the file, not from configuration.** Rebuilding a €10,000
+  run inside a portfolio that believes it started at €300 would report +3000% on the first
+  cycle.
+
+Writes go through a temp file and a rename, so an interrupted save leaves the previous good
+state rather than a truncated one. A save that fails is logged and swallowed: losing a
+checkpoint costs history, crashing the loop costs the run.
+
 ## Execution and cost realism
 
 `execution/costs.ts` is used by both the paper broker and the backtester, so a strategy
@@ -217,7 +240,8 @@ generated the signal is a look-ahead bug that produces beautiful, fictional equi
 ## What is still deliberately absent
 
 - No live broker. `createLiveBroker()` throws; there is no live order path to review.
-- No database. Agent state is in memory; the decision journal is an append-only file.
+- No database. State and the journal are files; they survive restarts but not concurrent
+  writers, so two agents sharing a `data/` directory will corrupt each other's history.
 - No withdrawal, transfer, account-opening or bank-detail method anywhere, at any layer.
 - No open-world entity recognition, and no estimated correlation matrix — both are curated
   lists, and their limits are stated rather than papered over.

@@ -2,6 +2,7 @@
 import { loadConfig } from '../src/config/env.js';
 import { loadEnvFile } from '../src/config/load-env.js';
 import { createLogger } from '../src/core/logger.js';
+import { AgentStateStore, StateMismatchError } from '../src/database/agent-state-store.js';
 import { startApiServer } from '../apps/api/server.js';
 import { TradingAgent } from '../apps/worker/agent.js';
 
@@ -11,6 +12,7 @@ import { TradingAgent } from '../apps/worker/agent.js';
  *   npm run paper                 loop + dashboard on http://127.0.0.1:3000
  *   npm run paper -- --once       a single cycle, then exit
  *   npm run paper -- --no-server  loop without the dashboard
+ *   npm run paper -- --fresh      ignore any saved state and start over
  *
  * Refuses to start in live mode: this entry point is for simulation, and a
  * command named "paper" must never be the thing that trades real money.
@@ -32,9 +34,25 @@ if (config.isLive) {
 const args = process.argv.slice(2);
 const once = args.includes('--once');
 const withServer = !args.includes('--no-server');
+const fresh = args.includes('--fresh');
 const port = Number(process.env.DASHBOARD_PORT ?? 3000);
 
-const agent = new TradingAgent({ config });
+// Persistence is on by default. The point of a continuous paper run is to
+// accumulate a track record, and a portfolio that resets on every restart
+// cannot produce one.
+const stateStore = fresh ? undefined : new AgentStateStore();
+
+let agent: TradingAgent;
+try {
+  agent = new TradingAgent({ config, ...(stateStore ? { stateStore } : {}) });
+} catch (err) {
+  if (err instanceof StateMismatchError) {
+    console.error(`\n${err.message}\n`);
+    console.error('Or run `npm run paper -- --fresh` to start a new run without touching it.\n');
+    process.exit(1);
+  }
+  throw err;
+}
 
 console.log('\n=== AI Market Agent — paper trading ===\n');
 console.log(`  mode                ${config.MODE} (no real money)`);
@@ -42,6 +60,15 @@ console.log(`  capital             ${config.initialCapital} ${config.BASE_CURREN
 console.log(`  watchlist           ${config.WATCHLIST.join(', ')}`);
 console.log(`  LLM provider        ${agent.getLlmProviderId()}`);
 console.log(`  cycle interval      ${config.INGEST_INTERVAL_SECONDS}s`);
+console.log(`  state               ${stateStore ? stateStore.path : 'not persisted (--fresh)'}`);
+
+if (agent.getState().cycles > 0) {
+  console.log(
+    `\n  Resumed: ${agent.getState().cycles} previous cycles, ` +
+      `${agent.portfolio.trades.length} closed trades, ` +
+      `value ${agent.portfolio.totalValue.toFixed(2)} ${config.BASE_CURRENCY}.`,
+  );
+}
 
 if (agent.getLlmProviderId() === 'none') {
   console.log(

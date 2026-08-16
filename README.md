@@ -14,7 +14,7 @@ lets an independent Risk Engine decide whether anything is allowed to become an 
 > and live trading requires an explicit, multi-part configuration that the process validates
 > at startup. There is no code path anywhere in this repository to withdraw funds, transfer
 > money, change bank details or open an account — and there must never be one. The
-> `BrokerAdapter` interface has five methods and none of them moves money.
+> `BrokerAdapter` interface has six methods and none of them moves money.
 
 ---
 
@@ -79,14 +79,14 @@ src/
 ├── risk/          independent risk engine + position sizing
 ├── execution/     broker interface · paper broker · portfolio · cost model · live (disabled)
 ├── backtesting/   event-driven engine · metrics · walk-forward
-├── database/      append-only decision journal
+├── database/      append-only decision journal + agent state persistence
 └── monitoring/    counters and latency histograms
 apps/
 ├── worker/        the trading agent loop
 ├── dashboard/     server-rendered HTML
 └── api/           read-only localhost JSON API
 scripts/           CLI entry points
-tests/             251 tests, zero network access
+tests/             266 tests, zero network access
 docs/              audit, API research, architecture, risks, spec adaptations
 ```
 
@@ -99,14 +99,15 @@ git clone <this repo>
 cd ai-market-agent
 npm install
 cp .env.example .env      # works as-is; no credentials needed to start
-npm test                  # 251 tests, no network required
+npm test                  # 266 tests, no network required
 npm run config:check      # shows the effective safety posture
 npm run sources:check     # probes every configured data source — start here
 npm run backtest -- --fixture   # a full backtest with no API keys
 npm run paper             # paper trading loop + dashboard on :3000
 ```
 
-Optional local infrastructure (the agent runs entirely in memory; the journal is a file):
+Optional local infrastructure (nothing uses it yet — state and the journal are files under
+`data/`):
 
 ```bash
 docker compose up -d      # PostgreSQL + Redis
@@ -117,7 +118,7 @@ docker compose up -d      # PostgreSQL + Redis
 | Command | What it does |
 |---|---|
 | `npm run dev` | Continuous ingestion loop (no trading) |
-| `npm run paper` | Full paper-trading agent + dashboard. `-- --once` for one cycle, `-- --no-server` to skip the dashboard |
+| `npm run paper` | Full paper-trading agent + dashboard, resuming saved state. `-- --once`, `-- --no-server`, `-- --fresh` |
 | `npm run backtest` | Historical backtest. `-- --symbol NVDA --years 5 --walk-forward --benner --fixture` |
 | `npm run dashboard` | Dashboard only, against a fresh agent state |
 | `npm run config:check` | Effective configuration and safety posture; never prints secrets |
@@ -278,6 +279,7 @@ traded.
 npm run paper                 # continuous, dashboard on http://127.0.0.1:3000
 npm run paper -- --once       # a single cycle, then exit
 npm run paper -- --no-server  # no dashboard
+npm run paper -- --fresh      # ignore saved state and start a new run
 ```
 
 Each cycle marks open positions to market, ingests, detects and verifies events, asks the
@@ -289,6 +291,17 @@ displayed as prominently as gains.
 Every decision is appended to `data/decisions.jsonl` — including decisions that produced no
 order. A journal of executed trades only is survivorship-biased and cannot answer whether
 the signals work.
+
+State persists to `data/agent-state.json` and is checkpointed after every cycle, so a
+restart resumes the same experiment: portfolio, drawdown history, counters, and the order
+ids that duplicate protection depends on. Without it a run could never accumulate more
+history than its longest uptime, which for a question needing months of observations is the
+difference between a track record and a demo.
+
+The state file is **refused, never reconciled**, when the mode, currency or starting capital
+does not match the running configuration — those numbers describe a different experiment,
+and adopting them would produce a P&L that is arithmetic on unrelated figures. Use
+`--fresh` to start over without touching the saved run.
 
 Paper runs at `PAPER_CAPITAL_EUR=10000` while `LIVE_CAPITAL_EUR=300` stays the real-money
 target. The reason is measurement: at a few hundred euros, a 1% per-trade risk budget is €3,
@@ -404,8 +417,9 @@ is no method through which to do so.
 - Contradiction detection is keyword-based: it spots denial language, it cannot tell which
   claim is denied.
 - Correlation groups are a hand-maintained mapping, not an estimated correlation matrix.
-- No database persistence: agent state is in memory and the journal is an append-only JSONL
-  file. Restarting resets the portfolio.
+- No database. State is a JSON file and the journal an append-only JSONL file; both survive
+  restarts, but neither supports concurrent writers. Two agents sharing a `data/` directory
+  will corrupt each other's history.
 - Reaction time is seconds-to-minutes. This system does not compete on speed.
 
 ## Risks

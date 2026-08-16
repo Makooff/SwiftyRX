@@ -3,6 +3,11 @@ import { ageSeconds, type Clock, systemClock } from '../../src/core/clock.js';
 import { sha256 } from '../../src/core/hash.js';
 import { createLogger, type Logger } from '../../src/core/logger.js';
 import type { HealthReport, NormalizedDocument } from '../../src/domain/types.js';
+import {
+  AgentStateStore,
+  fingerprintOf,
+  type StateFingerprint,
+} from '../../src/database/agent-state-store.js';
 import { DecisionJournal } from '../../src/database/decision-journal.js';
 import { PaperBroker } from '../../src/execution/paper/paper-broker.js';
 import { Portfolio } from '../../src/execution/paper/portfolio.js';
@@ -65,6 +70,12 @@ export interface AgentOptions {
   journalPath?: string;
   /** Minimum composite score before the Risk Engine is consulted. */
   minScoreForOrder?: number;
+  /**
+   * Where to persist portfolio and counters between runs. Omit for an
+   * in-memory agent that starts fresh — which is what the tests want, and what
+   * a one-shot `--once` run does not need.
+   */
+  stateStore?: AgentStateStore;
 }
 
 export class TradingAgent {
@@ -87,6 +98,11 @@ export class TradingAgent {
   private lastHealth: HealthReport[] = [];
   private regimeBySymbol = new Map<string, MarketRegime>();
 
+  private readonly stateStore: AgentStateStore | undefined;
+  private readonly fingerprint: StateFingerprint;
+  /** When this experiment began, carried across restarts. */
+  private readonly firstStartedAt: string;
+
   private state: AgentState;
 
   constructor(options: AgentOptions) {
@@ -107,13 +123,22 @@ export class TradingAgent {
 
     this.generator = new SignalGenerator(this.llm, this.log);
 
-    this.portfolio = new Portfolio({
-      // Paper mode by construction: this is `initialCapital`, which resolves to
-      // PAPER_CAPITAL_EUR outside live mode.
-      initialCash: options.config.initialCapital,
-      currency: options.config.BASE_CURRENCY,
-      clock: this.clock,
-    });
+    this.stateStore = options.stateStore;
+    this.fingerprint = fingerprintOf(options.config);
+    // Throws on a mismatched or corrupt state file. Failing at startup is the
+    // point: a run that silently discards its own history cannot be trusted to
+    // report on itself.
+    const restored = this.stateStore?.load(this.fingerprint);
+
+    this.portfolio = restored
+      ? Portfolio.restore(restored.portfolio, { clock: this.clock })
+      : new Portfolio({
+          // Paper mode by construction: this is `initialCapital`, which resolves
+          // to PAPER_CAPITAL_EUR outside live mode.
+          initialCash: options.config.initialCapital,
+          currency: options.config.BASE_CURRENCY,
+          clock: this.clock,
+        });
 
     this.broker = new PaperBroker({
       portfolio: this.portfolio,
@@ -135,18 +160,65 @@ export class TradingAgent {
       ...(options.minScoreForOrder !== undefined ? { minScore: options.minScoreForOrder } : {}),
     });
 
+    if (restored) {
+      this.riskEngine.rememberOrderIds(restored.consumedOrderIds);
+    }
+
+    this.firstStartedAt = restored?.firstStartedAt ?? this.clock.now().toISOString();
+
     this.state = {
       startedAt: this.clock.now().toISOString(),
-      cycles: 0,
-      documentsIngested: 0,
-      eventsDetected: 0,
-      signalsGenerated: 0,
-      ordersPlaced: 0,
-      ordersRejectedByRisk: 0,
+      cycles: restored?.counters.cycles ?? 0,
+      documentsIngested: restored?.counters.documentsIngested ?? 0,
+      eventsDetected: restored?.counters.eventsDetected ?? 0,
+      signalsGenerated: restored?.counters.signalsGenerated ?? 0,
+      ordersPlaced: restored?.counters.ordersPlaced ?? 0,
+      ordersRejectedByRisk: restored?.counters.ordersRejectedByRisk ?? 0,
       errors: [],
       halted: false,
       haltReasons: [],
     };
+
+    if (restored) {
+      this.log.info(
+        {
+          savedAt: restored.savedAt,
+          cycles: this.state.cycles,
+          totalValue: this.portfolio.totalValue,
+          openPositions: this.portfolio.openPositions.length,
+        },
+        'resumed from persisted state',
+      );
+    }
+  }
+
+  /**
+   * Persist portfolio and counters.
+   *
+   * A failure here is logged and swallowed: losing a checkpoint costs history,
+   * whereas crashing the loop costs the run. The distinction matters because
+   * this is called on every cycle.
+   */
+  saveState(): void {
+    if (!this.stateStore) return;
+    try {
+      this.stateStore.save({
+        fingerprint: this.fingerprint,
+        portfolio: this.portfolio.serialize(),
+        counters: {
+          cycles: this.state.cycles,
+          documentsIngested: this.state.documentsIngested,
+          eventsDetected: this.state.eventsDetected,
+          signalsGenerated: this.state.signalsGenerated,
+          ordersPlaced: this.state.ordersPlaced,
+          ordersRejectedByRisk: this.state.ordersRejectedByRisk,
+        },
+        consumedOrderIds: this.riskEngine.submittedOrderIds,
+        firstStartedAt: this.firstStartedAt,
+      });
+    } catch (err) {
+      this.recordError('state', `could not persist agent state: ${(err as Error).message}`);
+    }
   }
 
   getState(): AgentState {
@@ -201,8 +273,22 @@ export class TradingAgent {
     }
   }
 
-  /** One complete pass through the pipeline. */
+  /**
+   * One complete pass through the pipeline, checkpointed however it ends.
+   *
+   * The cycle has several early exits — no documents, no events, an ingestion
+   * failure — and a checkpoint has to happen on all of them. A `finally` is the
+   * only way to say that once rather than at each return.
+   */
   async runCycle(options: { since?: Date } = {}): Promise<void> {
+    try {
+      await this.runCycleInner(options);
+    } finally {
+      this.saveState();
+    }
+  }
+
+  private async runCycleInner(options: { since?: Date } = {}): Promise<void> {
     const cycleStart = this.clock.nowMs();
     this.state.cycles += 1;
     this.state.lastCycleAt = this.clock.now().toISOString();

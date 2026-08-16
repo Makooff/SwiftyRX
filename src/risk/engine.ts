@@ -290,4 +290,19 @@ export class RiskEngine {
   resetOrderHistory(): void {
     this.seenOrderIds.clear();
   }
+
+  /** Submitted order ids, so duplicate protection can survive a restart. */
+  get submittedOrderIds(): string[] {
+    return [...this.seenOrderIds];
+  }
+
+  /**
+   * Re-seed duplicate protection from persisted state.
+   *
+   * Without this, a restart makes every previously submitted order id look
+   * fresh, and a replayed signal places the same order twice.
+   */
+  rememberOrderIds(ids: Iterable<string>): void {
+    for (const id of ids) this.seenOrderIds.add(id);
+  }
 }

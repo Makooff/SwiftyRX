@@ -29,6 +29,31 @@ export interface PortfolioOptions {
   clock?: Clock;
 }
 
+/**
+ * Everything mutable in a portfolio, in a form that survives a restart.
+ *
+ * Deliberately a plain data shape rather than a class dump: it has to be
+ * readable by a human deciding whether to trust a state file, and diffable when
+ * a run does something surprising.
+ */
+export interface PortfolioState {
+  version: 1;
+  currency: string;
+  initialCash: number;
+  cash: number;
+  positions: Position[];
+  closedTrades: ClosedTrade[];
+  marks: Record<string, number>;
+  peak: number;
+  maxDrawdownPct: number;
+  dayStart: number;
+  dayStartedOn: string;
+  realisedPnlToday: number;
+  tradesToday: number;
+  consecutiveLosses: number;
+  lastLossAt?: string;
+}
+
 export class Portfolio {
   readonly currency: string;
   readonly initialCash: number;
@@ -210,6 +235,63 @@ export class Portfolio {
       0,
     );
     return Number(((exposure / value) * 100).toFixed(2));
+  }
+
+  /** Full mutable state, for persistence across restarts. */
+  serialize(): PortfolioState {
+    return {
+      version: 1,
+      currency: this.currency,
+      initialCash: this.initialCash,
+      cash: this.cash,
+      positions: this.openPositions,
+      closedTrades: this.trades,
+      marks: Object.fromEntries(this.marks),
+      peak: this.peak,
+      maxDrawdownPct: this.maxDrawdownPct,
+      dayStart: this.dayStart,
+      dayStartedOn: this.dayStartedOn,
+      realisedPnlToday: this.realisedPnlToday,
+      tradesToday: this.tradesToday,
+      consecutiveLosses: this.consecutiveLosses,
+      ...(this.lastLossAt ? { lastLossAt: this.lastLossAt } : {}),
+    };
+  }
+
+  /**
+   * Rebuild a portfolio from a serialised state.
+   *
+   * `initialCash` comes from the state, not from configuration: restoring a
+   * €10,000 run into a portfolio that believes it started at €300 would report
+   * a return of +3000% on the first cycle. The caller is responsible for
+   * deciding whether the state belongs to this configuration at all — see
+   * `AgentStateStore`, which refuses a mismatch rather than reconciling it.
+   */
+  static restore(state: PortfolioState, options: { clock?: Clock } = {}): Portfolio {
+    if (state.version !== 1) {
+      throw new Error(`Unsupported portfolio state version: ${String(state.version)}`);
+    }
+
+    const portfolio = new Portfolio({
+      initialCash: state.initialCash,
+      currency: state.currency,
+      ...(options.clock ? { clock: options.clock } : {}),
+    });
+
+    portfolio.cash = state.cash;
+    for (const position of state.positions) portfolio.positions.set(position.symbol, { ...position });
+    portfolio.closedTrades.push(...state.closedTrades);
+    for (const [symbol, price] of Object.entries(state.marks)) portfolio.marks.set(symbol, price);
+    portfolio.peak = state.peak;
+    portfolio.maxDrawdownPct = state.maxDrawdownPct;
+    portfolio.dayStart = state.dayStart;
+    portfolio.dayStartedOn = state.dayStartedOn;
+    portfolio.realisedPnlToday = state.realisedPnlToday;
+    portfolio.tradesToday = state.tradesToday;
+    portfolio.consecutiveLosses = state.consecutiveLosses;
+    if (state.lastLossAt) portfolio.lastLossAt = state.lastLossAt;
+
+    return portfolio;
   }
 
   /** The view the Risk Engine consumes. */
