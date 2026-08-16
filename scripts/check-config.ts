@@ -18,7 +18,11 @@ try {
   console.log(`  mode                      ${config.MODE}`);
   console.log(`  paper trading             ${config.PAPER_TRADING}`);
   console.log(`  live trading              ${config.LIVE_TRADING}`);
-  console.log(`  initial capital           ${config.INITIAL_CAPITAL_EUR} ${config.BASE_CURRENCY}`);
+  console.log(
+    `  active capital            ${config.initialCapital} ${config.BASE_CURRENCY} (${config.MODE})`,
+  );
+  console.log(`  paper capital             ${config.PAPER_CAPITAL_EUR} ${config.BASE_CURRENCY}`);
+  console.log(`  live capital target       ${config.LIVE_CAPITAL_EUR} ${config.BASE_CURRENCY}`);
   console.log(`  watchlist                 ${config.WATCHLIST.join(', ') || '(empty)'}`);
   console.log(`  allowed assets (live)     ${config.ALLOWED_ASSETS.join(', ') || '(empty)'}`);
 

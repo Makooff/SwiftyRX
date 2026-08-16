@@ -59,9 +59,19 @@ const rawSchema = z.object({
   ALLOW_SHORT_SELLING: bool(false),
   MAX_LEVERAGE: num(1),
 
-  // ---- Risk limits (consumed by the Risk Engine in Phase 4) ---------------
-  INITIAL_CAPITAL_EUR: num(300),
+  // ---- Capital ------------------------------------------------------------
+  /**
+   * Paper and backtest portfolio size. Deliberately larger than the live
+   * target: at a few hundred euros, position sizes are swamped by commission
+   * and spread, so paper results measure costs rather than signal quality.
+   * See docs/SPEC_ADAPTATIONS.md §6.
+   */
+  PAPER_CAPITAL_EUR: num(10_000),
+  /** Real money actually at risk if live trading is ever enabled. */
+  LIVE_CAPITAL_EUR: num(300),
   BASE_CURRENCY: z.string().default('EUR'),
+
+  // ---- Risk limits (consumed by the Risk Engine in Phase 4) ---------------
   MAX_POSITION_PERCENT: num(20),
   MAX_DAILY_LOSS_PERCENT: num(2),
   MAX_PORTFOLIO_EXPOSURE_PERCENT: num(80),
@@ -117,6 +127,8 @@ export type AppConfig = z.infer<typeof rawSchema> & {
   isLive: boolean;
   isPaper: boolean;
   isBacktest: boolean;
+  /** Starting capital for the active mode: live uses real money, others do not. */
+  initialCapital: number;
   userAgent: string;
 };
 
@@ -174,8 +186,11 @@ function assertSafetyInvariants(cfg: z.infer<typeof rawSchema>): string[] {
   if (cfg.ALLOW_OPTIONS && !cfg.ALLOW_DERIVATIVES) {
     problems.push('ALLOW_OPTIONS=true requires ALLOW_DERIVATIVES=true (explicit opt-in).');
   }
-  if (cfg.INITIAL_CAPITAL_EUR <= 0) {
-    problems.push('INITIAL_CAPITAL_EUR must be > 0.');
+  if (cfg.PAPER_CAPITAL_EUR <= 0) {
+    problems.push('PAPER_CAPITAL_EUR must be > 0.');
+  }
+  if (cfg.LIVE_CAPITAL_EUR <= 0) {
+    problems.push('LIVE_CAPITAL_EUR must be > 0.');
   }
   if (cfg.MAX_QUOTE_STALENESS_SECONDS <= 0) {
     problems.push('MAX_QUOTE_STALENESS_SECONDS must be > 0.');
@@ -217,6 +232,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     isLive: cfg.MODE === 'live',
     isPaper: cfg.MODE === 'paper',
     isBacktest: cfg.MODE === 'backtest',
+    initialCapital: cfg.MODE === 'live' ? cfg.LIVE_CAPITAL_EUR : cfg.PAPER_CAPITAL_EUR,
     // Format expected by SEC EDGAR: "App Name contact@domain".
     userAgent: `${cfg.USER_AGENT_APP_NAME} ${contact}`,
   };

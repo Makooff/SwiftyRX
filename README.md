@@ -5,8 +5,8 @@ releases, macro data and market prices, and is being built toward analysing them
 LLM to produce **BUY / SELL / HOLD / WATCH** signals with confidence scores, reasoning and
 sources.
 
-> **Status: Phase 1 of 9.** Data ingestion works. There are no signals, no LLM calls, no
-> portfolio and no broker connection yet. `npm run paper` and `npm run backtest` exist and
+> **Status: Phase 2 of 9.** Data ingestion, event detection and source verification work.
+> There are no signals, no LLM calls, no portfolio and no broker connection yet. `npm run paper` and `npm run backtest` exist and
 > deliberately refuse to run — see [Development phases](#development-phases).
 
 > **No real money is at risk.** The system defaults to `MODE=paper` with `LIVE_TRADING=false`,
@@ -43,7 +43,7 @@ DATA SOURCES → INGESTION → NORMALISATION → DEDUPLICATION → EVENT DETECTI
     → RISK ENGINE → PAPER ORDER → PORTFOLIO → MONITORING
 ```
 
-Phase 1 implements the first three stages. Full detail in
+Phases 1–2 implement everything up to source verification. Full detail in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Four principles shape everything:
@@ -53,8 +53,9 @@ Four principles shape everything:
 - **Missing or stale data means DO NOT TRADE.** Every price carries provenance and an age.
   A quote past its staleness limit raises an error instead of being served with a warning.
 - **No source is trusted on its own.** Every document enters as `unverified`, including SEC
-  filings. A social post can never trigger an order — it is a lead to check against an
-  official source.
+  filings. Confidence comes from independent corroboration and official confirmation, with
+  every adjustment recorded. Ten outlets running one wire story count as one report, and a
+  cluster of social posts is capped no matter how many accounts repeat it.
 - **Failures are loud.** Adapters throw rather than returning empty results, because an
   empty array reads downstream as "nothing happened".
 
@@ -64,29 +65,31 @@ src/
 ├── core/        http, rate limiting, circuit breaker, clock, cache, secret redaction
 ├── domain/      shared types (documents, quotes, bars, freshness, health)
 ├── ingestion/   news · official_sources · macro · market_data · social
+├── intelligence/ entity_resolution · event_detector · verification
 └── monitoring/  counters and latency histograms
 scripts/         CLI entry points
-tests/           107 tests, zero network access
-docs/            audit, API research, architecture, risks, extension guide
+tests/           149 tests, zero network access
+docs/            audit, API research, architecture, risks, spec adaptations
 ```
 
 ## Installation
 
-Requires **Node.js ≥ 20.12** (developed on 22). Docker is optional until Phase 2.
+Requires **Node.js ≥ 20.12** (developed on 22). Docker is not needed yet.
 
 ```bash
 git clone <this repo>
 cd ai-market-agent
 npm install
 cp .env.example .env      # works as-is; no credentials needed to start
-npm test                  # 107 tests, no network required
+npm test                  # 149 tests, no network required
 npm run config:check      # shows the effective safety posture
 npm run sources:check     # probes every configured data source — start here
 npm run ingest:once       # one ingestion cycle
+npm run events:detect     # ingest, then detect and verify events
 npm run dev               # continuous ingestion loop
 ```
 
-Optional local infrastructure (not used until Phase 2):
+Optional local infrastructure (nothing persists to it yet — Phase 3 onward):
 
 ```bash
 docker compose up -d      # PostgreSQL + Redis
@@ -100,6 +103,7 @@ docker compose up -d      # PostgreSQL + Redis
 | `npm run config:check` | Effective configuration and safety posture; never prints secrets |
 | `npm run sources:check` | Live health probe of every configured source; non-zero exit if any is broken |
 | `npm run ingest:once` | Single ingestion cycle with a summary |
+| `npm run events:detect` | Ingest, then detect, cluster and verify events |
 | `npm test` | Full test suite |
 | `npm run lint` / `npm run typecheck` | ESLint / TypeScript |
 | `npm run paper` | **Refuses to run** — Phase 5 |
@@ -120,7 +124,8 @@ The safety-critical settings:
 | `ALLOWED_ASSETS` | *(empty)* | The only instruments an order may ever target |
 | `ALLOW_CRYPTO/OPTIONS/DERIVATIVES/MARGIN/SHORT_SELLING` | `false` | All off |
 | `MAX_LEVERAGE` | `1` | >1 requires `ALLOW_MARGIN=true` |
-| `INITIAL_CAPITAL_EUR` | `300` | Virtual portfolio size |
+| `PAPER_CAPITAL_EUR` | `10000` | Paper/backtest portfolio — sized so costs don't dominate |
+| `LIVE_CAPITAL_EUR` | `300` | Real money at risk if live is ever enabled |
 | `MAX_POSITION_PERCENT` | `20` | Per-position cap |
 | `MAX_DAILY_LOSS_PERCENT` | `2` | Daily circuit breaker |
 | `MAX_QUOTE_STALENESS_SECONDS` | `120` | Past this, refuse to trade |
@@ -160,12 +165,46 @@ Nothing was implemented against a guessed endpoint.
 X is disabled by default with a daily read budget of zero. Also set a spending cap in the X
 developer console; do not rely on this code alone to protect your card.
 
+## Event detection and verification
+
+`npm run events:detect` runs the full built pipeline: ingest, classify, cluster, verify.
+
+Documents are classified by deterministic rules — SEC 8-K item codes and form types first
+(an item code is the issuer's own statement of what a filing is about), keyword rules over
+prose second, with lower weights. Anything unmatched stays `unclassified` rather than being
+guessed at. Documents are then clustered into one event per real-world occurrence, and each
+event gets a confidence that its claim is **true** — which is not the same as tradeable.
+
+Every adjustment is recorded in `verification.reasons`, so an event's confidence can always
+be explained:
+
+```
+[earnings] materiality=0.819 confidence=1.0 status=officially_confirmed
+  why: confirmed by authoritative source(s): sec_edgar; base = best source reliability (0.97);
+       +0.05 for 2 independent reports; +0.10 official confirmation
+
+[m_and_a] materiality=0.636 confidence=0.4 status=contradicted
+  why: denial language found in 1 document(s); base = 0.70; -0.35 contradiction detected
+```
+
+Three guarantees are structural, not advisory:
+
+- Syndicated republication counts once — ten outlets running one wire story is one newsroom.
+- A cluster of only social posts is capped at 0.35 and can never be marked confirmed.
+- An abnormal price move is only scored once a claim is independently established, so a
+  rumour cannot move a price and then have that move "confirm" the rumour.
+
 ## Paper trading
 
-Not yet implemented (Phase 5). When it lands: a €300 virtual portfolio, configurable, with
-drawdowns and losses displayed as prominently as gains. There will be no attempt to make
-€300 look like it compounds quickly — the point is to measure whether the signals work, and
-a €300 account is dominated by transaction costs long before strategy quality matters.
+Not yet implemented (Phase 5). When it lands: a virtual portfolio with drawdowns and losses
+displayed as prominently as gains.
+
+Paper runs at `PAPER_CAPITAL_EUR=10000` while `LIVE_CAPITAL_EUR=300` stays the real-money
+target. The reason is measurement: at a few hundred euros, a 1% per-trade risk budget is €3,
+most of which commission and spread consume, so results would measure costs rather than
+signal quality. Note that more capital per trade improves the signal-to-cost ratio but not
+the number of observations — judging whether the signals actually work still needs years of
+returns or hundreds of trades. See [`docs/SPEC_ADAPTATIONS.md`](docs/SPEC_ADAPTATIONS.md) §6.
 
 ## Backtesting
 
@@ -221,7 +260,12 @@ can only place, cancel and query orders on allow-listed instruments — it canno
 - Finnhub's free tier forbids commercial use. Alpha Vantage's free tier is 25 requests/day.
 - The X daily budget is per-process and in memory: two instances double the spend, and a
   restart resets it.
-- Deduplication matches text, not meaning. Same-event clustering is Phase 2.
+- Event classification is rule-based: precise on SEC filings (item codes), fuzzy on prose.
+  Unmatched documents are `unclassified` rather than guessed at.
+- The entity registry is a curated list of ~30 companies, countries and institutions, not
+  open-world entity recognition. Unlisted companies resolve to nothing.
+- Contradiction detection is keyword-based: it spots denial language, it cannot tell which
+  claim is denied. Matches flag an event for review rather than resolving the disagreement.
 - No persistence — Phase 1 runs entirely in memory.
 - Reaction time is seconds-to-minutes. This system does not compete on speed.
 
@@ -247,7 +291,7 @@ use `HttpClient`, stamp honest freshness metadata, fail loudly, and test against
 |---|---|---|
 | 0 | Repository audit, stack decision, API verification | **Done** |
 | 1 | Data adapters, normalisation, deduplication, health | **Done** |
-| 2 | Event detection and source verification | Not started |
+| 2 | Event detection and source verification | **Done** |
 | 3 | LLM analysis and structured signals | Not started |
 | 4 | Risk engine | Not started |
 | 5 | Paper broker and €300 portfolio | Not started |

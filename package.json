@@ -18,6 +18,7 @@
     "config:check": "tsx scripts/check-config.ts",
     "sources:check": "tsx scripts/check-sources.ts",
     "ingest:once": "tsx scripts/ingest-once.ts",
+    "events:detect": "tsx scripts/detect-events.ts",
     "paper": "tsx scripts/paper.ts",
     "backtest": "tsx scripts/backtest.ts"
   },

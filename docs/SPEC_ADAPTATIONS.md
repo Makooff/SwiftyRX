@@ -57,6 +57,16 @@ forgotten; a field on the document travels with it.
 
 This is the most important item here.
 
+> **Decided: adopted.** Paper and backtest now run at `PAPER_CAPITAL_EUR=10000`;
+> `LIVE_CAPITAL_EUR=300` remains the real-money target. `config.initialCapital` resolves to
+> whichever applies to the active mode. At 10k, a 1% single-trade risk budget is €100 rather
+> than €3, so commission and spread stop dominating the result and `MAX_TRADES_PER_DAY=10`
+> is no longer self-defeating — it is left at 10.
+>
+> The measurement problem below is **not** solved by this change: more capital per trade
+> improves the signal-to-cost ratio, not the number of observations. Judging whether the
+> signals work still needs years of returns or hundreds of trades.
+
 The brief sets `INITIAL_CAPITAL_EUR=300`, `MAX_TRADES_PER_DAY=10`,
 `MAX_DAILY_LOSS_PERCENT=2` and `MAX_SINGLE_TRADE_RISK_PERCENT=1`. Worked through:
 

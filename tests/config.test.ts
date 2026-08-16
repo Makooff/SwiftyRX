@@ -31,10 +31,17 @@ describe('default configuration', () => {
     expect(config.isLive).toBe(false);
   });
 
-  it('starts a €300 virtual portfolio', () => {
+  it('sizes the paper portfolio for measurement, not for the live target', () => {
     const config = loadConfig(empty);
-    expect(config.INITIAL_CAPITAL_EUR).toBe(300);
+    // Paper runs at a notional where costs do not dominate position sizes, so
+    // paper results say something about signal quality.
+    expect(config.PAPER_CAPITAL_EUR).toBe(10_000);
+    expect(config.initialCapital).toBe(10_000);
     expect(config.BASE_CURRENCY).toBe('EUR');
+  });
+
+  it('keeps the live capital target at €300', () => {
+    expect(loadConfig(empty).LIVE_CAPITAL_EUR).toBe(300);
   });
 
   it('disables every risky instrument class by default', () => {
@@ -62,6 +69,12 @@ describe('live trading guards', () => {
   it('accepts a fully specified live configuration', () => {
     const config = loadConfig(envFor(liveEnv));
     expect(config.isLive).toBe(true);
+  });
+
+  it('uses the live capital target, not the paper notional, in live mode', () => {
+    // Getting this backwards would risk 10k of real money on a 300 euro plan.
+    const config = loadConfig(envFor(liveEnv));
+    expect(config.initialCapital).toBe(300);
   });
 
   it('rejects live mode without the confirmation phrase', () => {

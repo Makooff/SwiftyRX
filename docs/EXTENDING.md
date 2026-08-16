@@ -53,6 +53,38 @@ Worked examples: `src/ingestion/macro/ecb.ts` (no credentials, CSV),
 `src/ingestion/market_data/alpaca.ts` (header auth, JSON),
 `src/ingestion/social/x.ts` (metered, budget-capped, low-trust).
 
+## Adding an entity or a classification rule (Phase 2)
+
+**A company, country or institution** — add an entry to
+`src/intelligence/entity_resolution/registry.ts`:
+
+```ts
+{ id: 'SAP', type: 'company', name: 'SAP SE', aliases: ['SAP'],
+  sector: 'technology', country: 'DE', tickers: ['SAP'] }
+```
+
+Aliases are matched case-insensitively on word boundaries, so keep them distinctive. A
+two-letter alias, or one that is also an ordinary English word, will fire on unrelated prose
+and attribute events to the wrong issuer. Precision matters far more than recall here: a
+miss leaves an event unattributed and harmless, a false match propagates into a signal about
+the wrong asset.
+
+**A classification rule** — add to `KEYWORD_RULES` in
+`src/intelligence/event_detector/rules.ts`:
+
+```ts
+{ id: 'kw:buyback', type: 'guidance', weight: 0.6,
+  pattern: /\b(share (?:buyback|repurchase) programme?)\b/i }
+```
+
+Weights accumulate per event type, so several corroborating rules beat one strong outlier.
+Keep prose rules below filing rules: an SEC item code states what a filing is; a keyword
+only suggests what a sentence is about. Every rule needs an `id`, because it appears in
+`classification.matched` and is how a classification gets audited later.
+
+**A new event type** — extend `EventType` and give it an entry in
+`EVENT_TYPE_MATERIALITY`. TypeScript will point out every table needing an update.
+
 ## Adding a new broker (Phase 5+)
 
 Brokers implement:
