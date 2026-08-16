@@ -35,6 +35,17 @@ import type { MarketDataSource } from '../types.js';
 
 const ALPACA_REQUESTS_PER_MINUTE = 200;
 
+/**
+ * Bars requested per page. 1000 is known-good against the live API; the
+ * documented ceiling is higher, but a value proven in practice beats one read
+ * off a page. Pagination makes the page size a throughput question, not a
+ * correctness one.
+ */
+const BARS_PAGE_SIZE = 1000;
+
+/** Runaway guard: 50 pages is ~200 years of daily bars. */
+const MAX_BAR_PAGES = 50;
+
 const INTERVAL_MAP: Record<BarInterval, string> = {
   '1Min': '1Min',
   '5Min': '5Min',
@@ -101,10 +112,12 @@ export class AlpacaMarketDataAdapter implements MarketDataSource {
   private readonly feed: 'iex' | 'sip';
   private readonly hasCredentials: boolean;
   private readonly clock: Clock;
+  private readonly log: Logger;
   private lastSuccessAt?: string;
 
   constructor(options: AlpacaMarketDataOptions = {}) {
     this.clock = options.clock ?? systemClock;
+    this.log = options.logger ?? createLogger('alpaca-data');
     this.feed = options.feed ?? 'iex';
     this.hasCredentials = Boolean(options.apiKeyId && options.apiSecretKey);
     this.delayNote =
@@ -126,7 +139,7 @@ export class AlpacaMarketDataAdapter implements MarketDataSource {
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       rateLimit: TokenBucket.perMinute(ALPACA_REQUESTS_PER_MINUTE, this.clock),
       clock: this.clock,
-      logger: options.logger ?? createLogger('alpaca-data'),
+      logger: this.log,
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     });
   }
@@ -177,40 +190,74 @@ export class AlpacaMarketDataAdapter implements MarketDataSource {
     };
   }
 
+  /**
+   * Historical bars, following pagination to the end of the range.
+   *
+   * Alpaca returns at most one page per request and reports `next_page_token`
+   * when more data exists. Ignoring that token silently truncates the range:
+   * a five-year request comes back as the first ~1000 bars and *looks* like a
+   * complete answer, which then quietly shortens every backtest built on it.
+   * That is the silent-success failure this codebase exists to avoid.
+   */
   async getBars(
     symbol: string,
     interval: BarInterval,
     options: { start: Date; end?: Date; limit?: number },
   ): Promise<Bar[]> {
-    const payload = await this.http.getJson<AlpacaBarsResponse>(
-      `stocks/${encodeURIComponent(symbol)}/bars`,
-      {
-        query: {
-          timeframe: INTERVAL_MAP[interval],
-          start: options.start.toISOString(),
-          ...(options.end ? { end: options.end.toISOString() } : {}),
-          limit: options.limit ?? 1000,
-          feed: this.feed,
-          adjustment: 'split',
+    const wanted = options.limit ?? Number.POSITIVE_INFINITY;
+    const bars: Bar[] = [];
+    let pageToken: string | undefined;
+    let pages = 0;
+
+    do {
+      const remaining = wanted - bars.length;
+      const payload = await this.http.getJson<AlpacaBarsResponse>(
+        `stocks/${encodeURIComponent(symbol)}/bars`,
+        {
+          query: {
+            timeframe: INTERVAL_MAP[interval],
+            start: options.start.toISOString(),
+            ...(options.end ? { end: options.end.toISOString() } : {}),
+            limit: Math.min(BARS_PAGE_SIZE, remaining),
+            feed: this.feed,
+            adjustment: 'split',
+            ...(pageToken ? { page_token: pageToken } : {}),
+          },
         },
-      },
-    );
+      );
+
+      for (const bar of payload.bars ?? []) {
+        bars.push({
+          symbol: payload.symbol ?? symbol,
+          timestamp: bar.t,
+          open: bar.o,
+          high: bar.h,
+          low: bar.l,
+          close: bar.c,
+          volume: bar.v,
+          ...(bar.vw !== undefined ? { vwap: bar.vw } : {}),
+          ...(bar.n !== undefined ? { tradeCount: bar.n } : {}),
+          interval,
+          freshness: this.freshness(bar.t),
+        });
+      }
+
+      pageToken = payload.next_page_token ?? undefined;
+      pages += 1;
+
+      // Runaway guard. Reaching it means the answer is incomplete, so it is
+      // reported rather than returned quietly — the whole point of the fix.
+      if (pages >= MAX_BAR_PAGES && pageToken) {
+        this.log.warn(
+          { symbol, interval, pages, bars: bars.length },
+          'stopped paginating at the page cap — the bar range is INCOMPLETE',
+        );
+        break;
+      }
+    } while (pageToken && bars.length < wanted);
 
     this.lastSuccessAt = this.clock.now().toISOString();
-
-    return (payload.bars ?? []).map((bar) => ({
-      symbol: payload.symbol ?? symbol,
-      timestamp: bar.t,
-      open: bar.o,
-      high: bar.h,
-      low: bar.l,
-      close: bar.c,
-      volume: bar.v,
-      ...(bar.vw !== undefined ? { vwap: bar.vw } : {}),
-      ...(bar.n !== undefined ? { tradeCount: bar.n } : {}),
-      interval,
-      freshness: this.freshness(bar.t),
-    }));
+    return bars;
   }
 
   async health(): Promise<HealthReport> {
