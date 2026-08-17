@@ -47,9 +47,17 @@ export function createFakeFetch(routes: FakeRoute[]): FakeFetch {
       throw new TypeError('fetch failed');
     }
 
-    const body = route.text !== undefined ? route.text : JSON.stringify(route.body ?? {});
+    const status = route.status ?? 200;
+    // 204/205/304 must carry a null body — Node's Response constructor throws
+    // on anything else, which a test would otherwise see as a network failure.
+    const body =
+      status === 204 || status === 205 || status === 304
+        ? null
+        : route.text !== undefined
+          ? route.text
+          : JSON.stringify(route.body ?? {});
     return new Response(body, {
-      status: route.status ?? 200,
+      status,
       headers: {
         'content-type': route.text !== undefined ? 'text/xml' : 'application/json',
         ...route.headers,

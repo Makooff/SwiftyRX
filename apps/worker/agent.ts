@@ -24,6 +24,11 @@ import { NullLLMProvider } from '../../src/intelligence/llm/null.js';
 import type { LLMProvider } from '../../src/intelligence/llm/types.js';
 import { detectEvents, eventsWorthAnalysing } from '../../src/intelligence/pipeline.js';
 import type { MarketEvent } from '../../src/intelligence/types.js';
+import {
+  DiscordApprover,
+  DiscordNotifier,
+  type ApprovalOutcome,
+} from '../../src/monitoring/discord.js';
 import { metrics } from '../../src/monitoring/metrics.js';
 import { RiskEngine } from '../../src/risk/engine.js';
 import type { RiskDecision } from '../../src/risk/types.js';
@@ -55,6 +60,8 @@ export interface AgentState {
   signalsGenerated: number;
   ordersPlaced: number;
   ordersRejectedByRisk: number;
+  /** Refused by a human on Discord, or by nobody answering. */
+  ordersRejectedByApproval: number;
   errors: Array<{ at: string; stage: string; message: string }>;
   halted: boolean;
   haltReasons: string[];
@@ -76,6 +83,9 @@ export interface AgentOptions {
    * a one-shot `--once` run does not need.
    */
   stateStore?: AgentStateStore;
+  /** Injected for tests; built from config otherwise. */
+  discord?: DiscordNotifier;
+  approver?: DiscordApprover;
 }
 
 export class TradingAgent {
@@ -98,6 +108,8 @@ export class TradingAgent {
   private lastHealth: HealthReport[] = [];
   private regimeBySymbol = new Map<string, MarketRegime>();
 
+  private readonly discord: DiscordNotifier | undefined;
+  private readonly approver: DiscordApprover | undefined;
   private readonly stateStore: AgentStateStore | undefined;
   private readonly fingerprint: StateFingerprint;
   /** When this experiment began, carried across restarts. */
@@ -122,6 +134,30 @@ export class TradingAgent {
         : new NullLLMProvider());
 
     this.generator = new SignalGenerator(this.llm, this.log);
+
+    this.discord =
+      options.discord ??
+      (options.config.DISCORD_WEBHOOK_URL
+        ? new DiscordNotifier({
+            webhookUrl: options.config.DISCORD_WEBHOOK_URL,
+            clock: this.clock,
+            logger: this.log,
+          })
+        : undefined);
+
+    // Built only when approval is actually required: a configured bot that
+    // nobody asked to gate trades should not silently start gating them.
+    this.approver =
+      options.approver ??
+      (options.config.REQUIRE_APPROVAL
+        ? new DiscordApprover({
+            ...(options.config.DISCORD_BOT_TOKEN ? { botToken: options.config.DISCORD_BOT_TOKEN } : {}),
+            ...(options.config.DISCORD_CHANNEL_ID ? { channelId: options.config.DISCORD_CHANNEL_ID } : {}),
+            timeoutSeconds: options.config.APPROVAL_TIMEOUT_SECONDS,
+            clock: this.clock,
+            logger: this.log,
+          })
+        : undefined);
 
     this.stateStore = options.stateStore;
     this.fingerprint = fingerprintOf(options.config);
@@ -174,6 +210,7 @@ export class TradingAgent {
       signalsGenerated: restored?.counters.signalsGenerated ?? 0,
       ordersPlaced: restored?.counters.ordersPlaced ?? 0,
       ordersRejectedByRisk: restored?.counters.ordersRejectedByRisk ?? 0,
+      ordersRejectedByApproval: 0,
       errors: [],
       halted: false,
       haltReasons: [],
@@ -298,10 +335,14 @@ export class TradingAgent {
     // Halting conditions are checked before any work: if trading is halted,
     // there is no point paying for LLM analysis this cycle.
     const halts = this.riskEngine.haltingConditions(this.portfolio.snapshot());
+    const wasHalted = this.state.halted;
     this.state.halted = halts.length > 0;
     this.state.haltReasons = halts.map((h) => h.message);
     if (halts.length > 0) {
       this.log.warn({ reasons: this.state.haltReasons }, 'trading halted this cycle');
+      // Announced on the transition only. A halt lasts the rest of the day, so
+      // notifying every cycle would be one message a minute until midnight.
+      if (!wasHalted) await this.announceHalt(this.state.haltReasons);
     }
 
     // --- Ingest ----------------------------------------------------------
@@ -441,7 +482,21 @@ export class TradingAgent {
         this.portfolio.snapshot(),
       );
 
-      if (riskDecision.verdict === 'approved') {
+      // Human approval, when configured, sits *after* the Risk Engine and can
+      // only subtract. A human cannot approve what risk refused — that would
+      // make the engine advisory, which is the one thing it must never be.
+      let approval: ApprovalOutcome | undefined;
+      if (riskDecision.verdict === 'approved' && this.approver?.isConfigured) {
+        approval = await this.approver.requestApproval(signal, riskDecision);
+        if (approval !== 'approved') {
+          this.state.ordersRejectedByApproval += 1;
+          this.log.info({ asset: signal.asset, approval }, 'order not approved — skipping');
+        }
+      }
+
+      const mayTrade = riskDecision.verdict === 'approved' && (approval ?? 'approved') === 'approved';
+
+      if (mayTrade) {
         try {
           order = await this.broker.placeOrder({
             symbol: riskDecision.symbol,
@@ -454,13 +509,16 @@ export class TradingAgent {
           this.state.ordersPlaced += 1;
           this.recentOrders.unshift(order);
           this.recentOrders.splice(50);
+          await this.discord?.order(order, signal);
         } catch (err) {
           this.recordError('execution', (err as Error).message);
         }
-      } else {
+      } else if (riskDecision.verdict !== 'approved') {
         this.state.ordersRejectedByRisk += 1;
       }
     }
+
+    await this.discord?.signal(signal, riskDecision);
 
     // Every decision is journalled, including the ones that produced no order.
     // A journal of only executed trades cannot answer whether the signals work.
@@ -473,6 +531,32 @@ export class TradingAgent {
       ...(riskDecision ? { riskDecision } : {}),
       ...(order ? { order } : {}),
     });
+  }
+
+  /**
+   * Post a portfolio summary to Discord.
+   *
+   * Called by the runner on a schedule rather than every cycle: a message per
+   * minute is noise, and noise is what stops people reading notifications.
+   */
+  async postSummary(): Promise<void> {
+    if (!this.discord) return;
+    await this.discord.summary({
+      totalValue: this.portfolio.totalValue,
+      currency: this.portfolio.currency,
+      returnPct: this.portfolio.totalReturnPct,
+      drawdownPct: this.portfolio.drawdownPct,
+      openPositions: this.portfolio.openPositions.length,
+      cycles: this.state.cycles,
+      signals: this.state.signalsGenerated,
+      orders: this.state.ordersPlaced,
+      riskRejections: this.state.ordersRejectedByRisk,
+    });
+  }
+
+  /** Notify that trading halted, once per transition rather than per cycle. */
+  private async announceHalt(reasons: string[]): Promise<void> {
+    await this.discord?.halted(reasons);
   }
 
   /** Age of the most recent successful cycle, in seconds. */

@@ -24,7 +24,7 @@ export interface HttpClientOptions {
 }
 
 export interface RequestOptions {
-  method?: 'GET' | 'POST' | 'DELETE' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
   query?: Record<string, string | number | boolean | undefined>;
   headers?: Record<string, string>;
   body?: unknown;

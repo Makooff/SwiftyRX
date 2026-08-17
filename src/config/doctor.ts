@@ -198,6 +198,35 @@ function social(config: AppConfig): Diagnostic {
   };
 }
 
+function discord(config: AppConfig): Diagnostic {
+  if (config.REQUIRE_APPROVAL) {
+    return {
+      id: 'discord',
+      label: 'Discord',
+      // Not "ok": every order now waits on a human, and an unanswered
+      // question is a refused trade. That is worth seeing on the status page.
+      status: 'degraded',
+      impact: `Notifications on. Every order needs a ✅ within ${config.APPROVAL_TIMEOUT_SECONDS}s or it is refused.`,
+      remedy:
+        'In paper mode this measures you rather than the strategy. Turn REQUIRE_APPROVAL off while collecting a track record.',
+    };
+  }
+  if (!config.DISCORD_WEBHOOK_URL) {
+    return {
+      id: 'discord',
+      label: 'Discord',
+      status: 'off',
+      impact: 'No notifications. The dashboard and the decision journal still record everything.',
+    };
+  }
+  return {
+    id: 'discord',
+    label: 'Discord',
+    status: 'ok',
+    impact: 'Notifications on: signals, orders, halts and a daily summary. Approval is off.',
+  };
+}
+
 export function diagnose(config: AppConfig): Diagnostic[] {
   return [
     tradingMode(config),
@@ -206,6 +235,7 @@ export function diagnose(config: AppConfig): Diagnostic[] {
     llm(config),
     secContact(config),
     macro(config),
+    discord(config),
     social(config),
   ];
 }
