@@ -126,6 +126,22 @@ const rawSchema = z.object({
   DASHBOARD_USER: z.string().default('admin'),
   DASHBOARD_PASSWORD: z.string().optional(),
 
+  // ---- Discord ------------------------------------------------------------
+  /** Webhook URL for notifications. Contains its own token — treat as a secret. */
+  DISCORD_WEBHOOK_URL: z.string().optional(),
+  /** Bot token, only needed for the approval flow. */
+  DISCORD_BOT_TOKEN: z.string().optional(),
+  DISCORD_CHANNEL_ID: z.string().optional(),
+  /**
+   * Ask on Discord before every order, and refuse if nobody answers.
+   *
+   * Off by default, and not merely for convenience: hand-approving trades
+   * during a paper run means the journal measures the operator rather than the
+   * strategy. Its real use is as a gate in front of real money.
+   */
+  REQUIRE_APPROVAL: bool(false),
+  APPROVAL_TIMEOUT_SECONDS: num(300),
+
   // ---- Ingestion ----------------------------------------------------------
   WATCHLIST: csv(['AAPL', 'MSFT', 'NVDA']),
   INGEST_INTERVAL_SECONDS: num(60),
@@ -217,6 +233,20 @@ function assertSafetyInvariants(cfg: z.infer<typeof rawSchema>): string[] {
   }
   if (cfg.DASHBOARD_PASSWORD !== undefined && cfg.DASHBOARD_PASSWORD.length < 12) {
     problems.push('DASHBOARD_PASSWORD must be at least 12 characters.');
+  }
+
+  // An approval gate that cannot ask anyone would refuse every trade, which
+  // looks exactly like a broken strategy. Fail at startup instead.
+  if (cfg.REQUIRE_APPROVAL) {
+    if (!cfg.DISCORD_BOT_TOKEN) {
+      problems.push('REQUIRE_APPROVAL=true requires DISCORD_BOT_TOKEN.');
+    }
+    if (!cfg.DISCORD_CHANNEL_ID) {
+      problems.push('REQUIRE_APPROVAL=true requires DISCORD_CHANNEL_ID.');
+    }
+    if (cfg.APPROVAL_TIMEOUT_SECONDS <= 0) {
+      problems.push('APPROVAL_TIMEOUT_SECONDS must be > 0.');
+    }
   }
 
   if (cfg.ENABLE_X_INGESTION) {

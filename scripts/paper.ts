@@ -96,6 +96,8 @@ process.on('SIGINT', () => stop('SIGINT'));
 process.on('SIGTERM', () => stop('SIGTERM'));
 
 let since = new Date(Date.now() - 6 * 3600 * 1000);
+// Set to today at startup so a restart does not re-post yesterday's summary.
+let lastSummaryDay = new Date().toISOString().slice(0, 10);
 
 do {
   const cycleStart = new Date();
@@ -128,6 +130,15 @@ do {
   // Health is refreshed once per cycle so the dashboard reflects reality
   // rather than the state at startup.
   await agent.refreshHealth();
+
+  // One Discord summary per day, on the first cycle after the date rolls.
+  // Anything more frequent is noise, and noise is what stops notifications
+  // being read at all.
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== lastSummaryDay) {
+    lastSummaryDay = today;
+    await agent.postSummary();
+  }
 
   const elapsed = Date.now() - cycleStart.getTime();
   await new Promise((resolve) =>
