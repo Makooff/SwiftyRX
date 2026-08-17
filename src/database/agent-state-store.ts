@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import type { AppConfig } from '../config/env.js';
 import { type Clock, systemClock } from '../core/clock.js';
 import type { PortfolioState } from '../execution/paper/portfolio.js';
+import type { ManagedPosition } from '../risk/position-manager.js';
 
 /**
  * Persistence for the paper agent's state.
@@ -55,6 +56,12 @@ export interface PersistedAgentState {
   counters: AgentCounters;
   /** Client order ids already used, so duplicate protection survives a restart. */
   consumedOrderIds: string[];
+  /**
+   * Exit plans. Optional because state files written before exits existed do
+   * not carry them — those positions are adopted with a default stop rather
+   * than left unmanaged.
+   */
+  exitPlans?: ManagedPosition[];
   firstStartedAt: string;
 }
 
@@ -141,6 +148,7 @@ export class AgentStateStore {
     portfolio: PortfolioState;
     counters: AgentCounters;
     consumedOrderIds: string[];
+    exitPlans?: ManagedPosition[];
     firstStartedAt: string;
   }): void {
     const state: PersistedAgentState = {

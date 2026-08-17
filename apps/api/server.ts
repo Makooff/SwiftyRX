@@ -27,6 +27,33 @@ export interface ApiServerOptions {
   logger?: Logger;
 }
 
+/**
+ * The effective configuration, as rows.
+ *
+ * Values only — never a credential. Whether a key is *present* is already on
+ * the health panel; the key itself has no reason to reach a browser.
+ */
+function settingsRows(config: AppConfig): DashboardData['settings'] {
+  return [
+    { label: 'Mode', value: config.MODE, note: config.isLive ? 'REAL MONEY' : 'no real money' },
+    { label: 'Capital', value: `${config.initialCapital} ${config.BASE_CURRENCY}` },
+    { label: 'Watchlist', value: config.WATCHLIST.join(', ') || '(empty)', note: `${config.WATCHLIST.length} instruments` },
+    { label: 'Cycle interval', value: `${config.INGEST_INTERVAL_SECONDS}s` },
+    { label: 'Model', value: config.LLM_PROVIDER === 'none' ? 'none' : config.LLM_MODEL },
+    { label: 'Max position', value: `${config.MAX_POSITION_PERCENT}%`, note: 'of portfolio value' },
+    { label: 'Risk per trade', value: `${config.MAX_SINGLE_TRADE_RISK_PERCENT}%`, note: 'enforced by the stop' },
+    { label: 'Daily loss limit', value: `${config.MAX_DAILY_LOSS_PERCENT}%`, note: 'halts trading for the day' },
+    { label: 'Max exposure', value: `${config.MAX_PORTFOLIO_EXPOSURE_PERCENT}%` },
+    { label: 'Correlated exposure', value: `${config.MAX_CORRELATED_EXPOSURE_PERCENT}%`, note: 'per group' },
+    { label: 'Max trades/day', value: String(config.MAX_TRADES_PER_DAY) },
+    { label: 'Loss cooldown', value: `${config.CONSECUTIVE_LOSS_COOLDOWN_MINUTES} min`, note: 'after consecutive losses' },
+    { label: 'Quote staleness', value: `${config.MAX_QUOTE_STALENESS_SECONDS}s`, note: 'past this: do not trade' },
+    { label: 'Short selling', value: config.ALLOW_SHORT_SELLING ? 'allowed' : 'off' },
+    { label: 'Leverage', value: `${config.MAX_LEVERAGE}x` },
+    { label: 'Manual approval', value: config.REQUIRE_APPROVAL ? 'required' : 'off', note: config.REQUIRE_APPROVAL ? 'no answer = no trade' : '' },
+  ];
+}
+
 function buildDashboardData(agent: TradingAgent, config: AppConfig): DashboardData {
   const portfolio = agent.portfolio;
   return {
@@ -56,6 +83,13 @@ function buildDashboardData(agent: TradingAgent, config: AppConfig): DashboardDa
     health: agent.getHealth(),
     agent: agent.getState(),
     activity: agent.getActivity(120),
+    settings: settingsRows(config),
+    exitPlans: agent.positions.serialize().map((plan) => ({
+      symbol: plan.symbol,
+      stopPrice: plan.stopPrice,
+      takeProfitPrice: plan.takeProfitPrice,
+      expiresAt: plan.expiresAt,
+    })),
     llmProvider: agent.getLlmProviderId(),
   };
 }
@@ -109,6 +143,10 @@ export function createApiServer(options: ApiServerOptions): Server {
             sources: health,
           });
         }
+        case '/api/settings':
+          return json(200, settingsRows(config));
+        case '/api/exits':
+          return json(200, agent.positions.serialize());
         case '/api/activity':
           return json(200, agent.getActivity(200));
         case '/api/metrics':

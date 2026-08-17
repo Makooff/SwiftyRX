@@ -166,3 +166,34 @@ describe('dashboard authentication', () => {
     expect(response.status).toBe(404);
   });
 });
+
+describe('settings panel', () => {
+  it('never puts a credential in the settings, only whether things are on', async () => {
+    // The health panel already says whether a key is present. The key itself
+    // has no reason to reach a browser.
+    const response = await request(
+      { DASHBOARD_PASSWORD: PASSWORD, ANTHROPIC_API_KEY: 'sk-ant-panel-secret', LLM_PROVIDER: 'anthropic' },
+      basic('admin', PASSWORD),
+      '/api/settings',
+    );
+    expect(response.status).toBe(200);
+    expect(response.body).not.toContain('sk-ant-panel-secret');
+    expect(response.body).toContain('claude-opus-5');
+  });
+
+  it('shows the risk limits that actually gate trading', async () => {
+    const response = await request({}, {}, '/api/settings');
+    for (const label of ['Daily loss limit', 'Risk per trade', 'Quote staleness', 'Max position']) {
+      expect(response.body, `${label} missing`).toContain(label);
+    }
+  });
+
+  it('exposes no endpoint that could change a setting', async () => {
+    // A dashboard that can retune risk limits is a dashboard that can remove
+    // them. Settings are read-only, and editing means .env plus a restart.
+    for (const path of ['/api/settings/update', '/api/config', '/api/settings/set']) {
+      const response = await request({}, {}, path);
+      expect(response.status, path).toBe(404);
+    }
+  });
+});

@@ -45,6 +45,10 @@ export interface DashboardData {
   health: HealthReport[];
   agent: AgentState;
   activity: ActivityEntry[];
+  /** Effective configuration, shown read-only. Never contains a credential. */
+  settings: Array<{ label: string; value: string; note?: string }>;
+  /** Stop, target and deadline for each open position. */
+  exitPlans: Array<{ symbol: string; stopPrice: number; takeProfitPrice: number; expiresAt: string }>;
   llmProvider: string;
 }
 
@@ -233,6 +237,30 @@ export function renderDashboard(data: DashboardData): string {
           .join('')
       : '<div class="empty">Nothing yet. The first entries appear on the next cycle.</div>';
 
+  const settingsRows = data.settings
+    .map(
+      (row) => `<tr>
+        <td class="muted">${escapeHtml(row.label)}</td>
+        <td class="mono">${escapeHtml(row.value)}</td>
+        <td class="muted">${escapeHtml(row.note ?? '')}</td>
+      </tr>`,
+    )
+    .join('');
+
+  const exitRows =
+    data.exitPlans.length > 0
+      ? data.exitPlans
+          .map(
+            (plan) => `<tr>
+        <td class="mono">${escapeHtml(plan.symbol)}</td>
+        <td class="neg">${plan.stopPrice}</td>
+        <td class="pos">${plan.takeProfitPrice}</td>
+        <td class="muted">${escapeHtml(plan.expiresAt.slice(0, 10))}</td>
+      </tr>`,
+          )
+          .join('')
+      : '<tr><td colspan="4" class="empty">No open positions</td></tr>';
+
   const healthRows =
     data.health.length > 0
       ? data.health
@@ -309,6 +337,30 @@ export function renderDashboard(data: DashboardData): string {
       </table></div>
     </section>
   </div>
+
+  <section>
+    <h2>Exit plans</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Symbol</th><th>Stop</th><th>Target</th><th>Expires</th></tr></thead>
+      <tbody>${exitRows}</tbody>
+    </table></div>
+    <p class="muted" style="margin:10px 0 0;font-size:12px">
+      Checked once per cycle against our own marks — these are not resting orders at the
+      broker, so a gap can fill worse than the stop.
+    </p>
+  </section>
+
+  <section>
+    <h2>Settings</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Setting</th><th>Value</th><th></th></tr></thead>
+      <tbody>${settingsRows}</tbody>
+    </table></div>
+    <p class="muted" style="margin:10px 0 0;font-size:12px">
+      Read-only. Changing these means editing <span class="mono">.env</span> and restarting —
+      deliberately: a dashboard that can retune risk limits is a dashboard that can remove them.
+    </p>
+  </section>
 
   <section>
     <h2>Activity</h2>
