@@ -32,6 +32,7 @@ import {
 import { ActivityLog, type ActivityEntry } from '../../src/monitoring/activity-log.js';
 import { metrics } from '../../src/monitoring/metrics.js';
 import { RiskEngine } from '../../src/risk/engine.js';
+import { PositionManager } from '../../src/risk/position-manager.js';
 import type { RiskDecision } from '../../src/risk/types.js';
 import { detectRegime, type MarketRegime } from '../../src/strategy/regime.js';
 import { SignalGenerator } from '../../src/strategy/signals/generator.js';
@@ -103,6 +104,8 @@ export class TradingAgent {
   private readonly generator: SignalGenerator;
   private readonly eventStore = new MemoryEventStore();
   readonly activity: ActivityLog;
+  /** Exit plans — the stops the sizing already assumed. */
+  readonly positions: PositionManager;
 
   private readonly recentSignals: Signal[] = [];
   private readonly recentEvents: MarketEvent[] = [];
@@ -137,6 +140,7 @@ export class TradingAgent {
 
     this.generator = new SignalGenerator(this.llm, this.log);
     this.activity = new ActivityLog({ clock: this.clock });
+    this.positions = new PositionManager({ clock: this.clock });
 
     this.discord =
       options.discord ??
@@ -201,6 +205,13 @@ export class TradingAgent {
 
     if (restored) {
       this.riskEngine.rememberOrderIds(restored.consumedOrderIds);
+      this.positions.restore(restored.exitPlans ?? []);
+      // Positions from a state file written before exits existed have no plan.
+      // Adopting them with a default stop is the only honest option: leaving
+      // them unmanaged would recreate the hole exits were built to close.
+      for (const held of this.portfolio.openPositions) {
+        this.positions.adoptIfUntracked(held, 5);
+      }
     }
 
     this.firstStartedAt = restored?.firstStartedAt ?? this.clock.now().toISOString();
@@ -254,6 +265,7 @@ export class TradingAgent {
           ordersRejectedByRisk: this.state.ordersRejectedByRisk,
         },
         consumedOrderIds: this.riskEngine.submittedOrderIds,
+        exitPlans: this.positions.serialize(),
         firstStartedAt: this.firstStartedAt,
       });
     } catch (err) {
@@ -301,13 +313,20 @@ export class TradingAgent {
     this.state.errors = this.state.errors.slice(0, 25);
   }
 
-  /** Refresh marks so the portfolio's value reflects current prices. */
-  private async markPositions(): Promise<void> {
+  /**
+   * Refresh marks and return the prices used, so exits can be checked against
+   * the same numbers the portfolio was valued with.
+   */
+  private async markPositions(): Promise<Map<string, number>> {
+    const prices = new Map<string, number>();
     for (const position of this.portfolio.openPositions) {
       try {
         const quote = await this.stack.marketData.getQuote(position.symbol);
         const price = quote.quote.last ?? quote.quote.bid;
-        if (price) this.portfolio.mark(position.symbol, price);
+        if (price) {
+          this.portfolio.mark(position.symbol, price);
+          prices.set(position.symbol, price);
+        }
       } catch (err) {
         // A position we cannot price is a reason to be careful, not a reason to
         // crash: the stale mark stays and the Risk Engine sees the same number.
@@ -315,6 +334,58 @@ export class TradingAgent {
           { symbol: position.symbol, error: (err as Error).message },
           'could not refresh position mark',
         );
+      }
+    }
+    return prices;
+  }
+
+  /**
+   * Close positions whose stop, target or horizon says so.
+   *
+   * Exits deliberately do NOT go through the Risk Engine's per-order checks.
+   * Those exist to gate *taking on* exposure; applying them to a close would
+   * let a limit block the very action that reduces risk — a full portfolio
+   * refusing to sell is how a bad position becomes a worse one. The engine
+   * still sees the result, because the portfolio it reads next cycle reflects
+   * it.
+   */
+  private async processExits(prices: Map<string, number>): Promise<void> {
+    const positions = this.portfolio.openPositions;
+    if (positions.length === 0) return;
+
+    // A position whose price is unknown is one whose stop cannot be checked.
+    // That is not a quiet state — it is the system being unable to enforce the
+    // limit it sized the trade against.
+    for (const symbol of this.positions.unpriceable(positions, prices)) {
+      this.activity.warn('exit', `${symbol}: no usable price — stop could not be evaluated`);
+    }
+
+    for (const exit of this.positions.exitsDue(positions, prices)) {
+      const held = positions.find((p) => p.symbol === exit.symbol);
+      if (!held) continue;
+      try {
+        const order = await this.broker.placeOrder({
+          symbol: exit.symbol,
+          side: 'sell',
+          quantity: held.quantity,
+          type: 'market',
+          clientOrderId: sha256(`exit|${exit.symbol}|${exit.reason}|${held.openedAt}`).slice(0, 24),
+          reason: `${exit.reason}: ${exit.message}`.slice(0, 200),
+        });
+        this.positions.forget(exit.symbol);
+        this.state.ordersPlaced += 1;
+        this.recentOrders.unshift(order);
+        this.recentOrders.splice(50);
+        this.activity.record(
+          exit.reason === 'take_profit' ? 'good' : 'warn',
+          'exit',
+          `${exit.symbol} closed — ${exit.message}`,
+        );
+        await this.discord?.order(order);
+      } catch (err) {
+        // A failed exit is the most dangerous failure in the system: the
+        // position stays open with no working stop. It must be loud.
+        this.recordError('exit', `${exit.symbol} (${exit.reason}): ${(err as Error).message}`);
       }
     }
   }
@@ -339,7 +410,10 @@ export class TradingAgent {
     this.state.cycles += 1;
     this.state.lastCycleAt = this.clock.now().toISOString();
 
-    await this.markPositions();
+    const marks = await this.markPositions();
+    // Before anything else, and regardless of halts: a halt stops new risk
+    // being taken, never the closing of risk already on the books.
+    await this.processExits(marks);
 
     // Halting conditions are checked before any work: if trading is halted,
     // there is no point paying for LLM analysis this cycle.
@@ -542,6 +616,20 @@ export class TradingAgent {
             reason: `signal ${signal.id}: ${signal.catalyst}`.slice(0, 200),
           });
           this.state.ordersPlaced += 1;
+          // The stop the sizing assumed is now a stop that will actually fire.
+          if (riskDecision.side === 'buy' && riskDecision.stopPrice !== undefined) {
+            const plan = this.positions.track({
+              symbol: riskDecision.symbol,
+              entryPrice: order.filledPrice ?? price!,
+              stopPrice: riskDecision.stopPrice,
+              ...(signal.expectedHorizon ? { horizon: signal.expectedHorizon } : {}),
+              signalId: signal.id,
+            });
+            this.activity.info(
+              'plan',
+              `${plan.symbol}: stop ${plan.stopPrice} · target ${plan.takeProfitPrice} · expires ${plan.expiresAt.slice(0, 10)}`,
+            );
+          }
           this.activity.good(
             'order',
             `${order.side.toUpperCase()} ${order.filledQuantity} ${order.symbol} @ ${order.filledPrice?.toFixed(4) ?? '?'} — ${order.status}`,
