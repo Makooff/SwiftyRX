@@ -82,7 +82,12 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em;
 .stat .label { color: var(--muted); font-size: 12px; }
 .stat .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+/* Tables scroll inside their own box rather than stretching the page. A
+   six-column table on a phone otherwise forces the whole layout sideways,
+   which makes every other panel unreadable to fix one. */
+.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums;
+  min-width: 460px; }
 th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px;
   padding: 6px 8px; border-bottom: 1px solid var(--border); }
 td { padding: 7px 8px; border-bottom: 1px solid #1d232b; vertical-align: top; }
@@ -242,35 +247,35 @@ export function renderDashboard(data: DashboardData): string {
       <div class="stat"><div class="label">Max drawdown</div><div class="value ${p.maxDrawdownPct > 0 ? 'neg' : ''}">${p.maxDrawdownPct.toFixed(2)}%</div></div>
       <div class="stat"><div class="label">Exposure</div><div class="value">${p.exposurePct.toFixed(1)}%</div></div>
     </div>
-    <table style="margin-top:16px">
+    <div class="scroll"><table style="margin-top:16px">
       <thead><tr><th>Symbol</th><th>Qty</th><th>Avg price</th><th>Value</th><th>Unrealised</th></tr></thead>
       <tbody>${positionsRows}</tbody>
-    </table>
+    </table></div>
   </section>
 
   <section>
     <h2>Signals</h2>
-    <table>
+    <div class="scroll"><table>
       <thead><tr><th>Time</th><th>Asset</th><th>Action</th><th>Score</th><th>Model conf.</th><th>Catalyst &amp; reasoning</th></tr></thead>
       <tbody>${signalRows}</tbody>
-    </table>
+    </table></div>
   </section>
 
   <div class="grid">
     <section>
       <h2>Events</h2>
-      <table>
+      <div class="scroll"><table>
         <thead><tr><th>Type</th><th>Headline</th><th>Materiality</th><th>Verification</th><th>Tickers</th></tr></thead>
         <tbody>${eventRows}</tbody>
-      </table>
+      </table></div>
     </section>
 
     <section>
       <h2>Orders</h2>
-      <table>
+      <div class="scroll"><table>
         <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill</th><th>Status</th><th>Costs</th></tr></thead>
         <tbody>${orderRows}</tbody>
-      </table>
+      </table></div>
     </section>
   </div>
 
@@ -284,10 +289,10 @@ export function renderDashboard(data: DashboardData): string {
       <div class="stat"><div class="label">Risk rejections</div><div class="value">${data.agent.ordersRejectedByRisk}</div></div>
       <div class="stat"><div class="label">Errors</div><div class="value ${data.agent.errors.length > 0 ? 'warn' : ''}">${data.agent.errors.length}</div></div>
     </div>
-    <table>
+    <div class="scroll"><table>
       <thead><tr><th>Source</th><th>Kind</th><th>State</th><th>Detail</th></tr></thead>
       <tbody>${healthRows}</tbody>
-    </table>
+    </table></div>
     ${
       data.agent.errors.length > 0
         ? `<details><summary>Recent errors</summary><ul>${data.agent.errors

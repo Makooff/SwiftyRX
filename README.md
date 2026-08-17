@@ -89,7 +89,7 @@ apps/
 ├── dashboard/     server-rendered HTML
 └── api/           read-only localhost JSON API
 scripts/           CLI entry points
-tests/             285 tests, zero network access
+tests/             303 tests, zero network access
 docs/              audit, API research, architecture, risks, spec adaptations
 ```
 
@@ -102,7 +102,7 @@ git clone <this repo>
 cd ai-market-agent
 npm install
 cp .env.example .env      # works as-is; no credentials needed to start
-npm test                  # 285 tests, no network required
+npm test                  # 303 tests, no network required
 npm run doctor            # what works, what doesn't, and what to do — start here
 npm run config:check      # shows the effective safety posture
 npm run sources:check     # probes every configured data source
@@ -362,6 +362,35 @@ chokepoint before rendering.
 The API is read-only. `POST /api/order`, `/api/orders/place`, `/api/trade` and `/api/cancel`
 return 404 because no such endpoint exists; there is a test asserting this. The dashboard
 observes, it does not act.
+
+### Reaching it from elsewhere
+
+Read-only is not the same as safe to publish: the page shows a live portfolio, its open
+positions and every signal.
+
+Preferred — publish nothing, tunnel instead:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 you@your-server
+```
+
+Otherwise set `DASHBOARD_HOST` and a password:
+
+```bash
+DASHBOARD_HOST=0.0.0.0
+DASHBOARD_USER=you
+DASHBOARD_PASSWORD=<at least 12 characters>
+```
+
+Startup **refuses** a non-loopback host without a password, or one under 12 characters, and
+there is no override flag — an override becomes the thing everyone sets. Authentication is
+HTTP Basic, checked before anything is read or rendered, and it covers the JSON API as well
+as the page: protecting only the HTML would be theatre. Unknown paths answer `401` rather
+than `404` before authentication, so the surface cannot be mapped anonymously.
+
+Basic auth over plain HTTP is base64, which is encoding rather than encryption — put it
+behind HTTPS. Deployment recipes, including Docker and systemd:
+[`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Security
 
