@@ -82,6 +82,17 @@ const rawSchema = z.object({
   /** Market data older than this is treated as unusable -> DO NOT TRADE. */
   MAX_QUOTE_STALENESS_SECONDS: num(120),
 
+  // ---- Evidence -----------------------------------------------------------
+  /**
+   * Where `npm run study --out` writes what the event study found, and where
+   * the agent reads it back.
+   *
+   * The book only ever blocks: a category the study measured drifting *against*
+   * a long is refused, and nothing in the file can license a trade. A missing
+   * file means no opinion, and the agent behaves as it did before one existed.
+   */
+  EVIDENCE_FILE: z.string().default('data/evidence.json'),
+
   // ---- Infrastructure -----------------------------------------------------
   DATABASE_URL: z.string().optional(),
   REDIS_URL: z.string().optional(),

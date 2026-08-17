@@ -3,6 +3,8 @@ import { loadConfig } from '../src/config/env.js';
 import { loadEnvFile } from '../src/config/load-env.js';
 import { createLogger } from '../src/core/logger.js';
 import { runEventStudy, type StudyEvent } from '../src/backtesting/event-study.js';
+import { roundTripCostPercent } from '../src/execution/costs.js';
+import { summariseEvidence, writeEvidenceFile } from '../src/strategy/evidence.js';
 import { buildIngestionStack } from '../src/ingestion/pipeline.js';
 import type { Bar } from '../src/domain/types.js';
 
@@ -22,6 +24,7 @@ import type { Bar } from '../src/domain/types.js';
  *   npm run study -- --years 5
  *   npm run study -- --symbols AAPL,MSFT
  *   npm run study -- --benchmark QQQ
+ *   npm run study -- --years 5 --out   write the evidence book the agent reads
  */
 
 loadEnvFile();
@@ -31,7 +34,9 @@ const log = createLogger('study');
 const args = process.argv.slice(2);
 function arg(name: string, fallback?: string): string | undefined {
   const index = args.indexOf(`--${name}`);
-  return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
+  const value = index >= 0 ? args[index + 1] : undefined;
+  // `--out --years 5` must not read "--years" as the output path.
+  return value && !value.startsWith('--') ? value : fallback;
 }
 
 const years = Number(arg('years', '2'));
@@ -103,9 +108,19 @@ try {
 console.log(`  ${barsBySymbol.size} symbol(s) priced${benchmarkBars ? `, benchmark ${benchmark} loaded` : ', NO BENCHMARK'}\n`);
 
 // --- Study -------------------------------------------------------------------
+// Costs are taken from the position size this account would actually trade: a
+// €1 commission is a rounding error on €50,000 and half the edge on €500.
+const notional = (config.PAPER_CAPITAL_EUR * config.MAX_POSITION_PERCENT) / 100;
+const roundTripCostPct = roundTripCostPercent(100, notional / 100);
+
+console.log(
+  `Cost model: ${roundTripCostPct}% round trip on a ${notional.toFixed(0)} ${config.BASE_CURRENCY} position.\n`,
+);
+
 const results = runEventStudy({
   events,
   barsBySymbol,
+  roundTripCostPct,
   ...(benchmarkBars ? { benchmarkBars } : {}),
 });
 
@@ -120,17 +135,50 @@ for (const result of results) {
     if (horizon.sampleSize === 0) continue;
     console.log(
       `  +${String(horizon.sessions).padEnd(2)}d  mean ${horizon.meanAbnormalPct.toFixed(3).padStart(8)}%  ` +
-        `median ${horizon.medianAbnormalPct.toFixed(3).padStart(8)}%  ` +
+        `net ${horizon.meanNetOfCostsPct.toFixed(3).padStart(8)}%  ` +
         `hit ${(horizon.hitRate * 100).toFixed(1).padStart(5)}%  ` +
-        `t ${horizon.tStat.toFixed(2).padStart(6)}  n=${horizon.sampleSize}`,
+        `t ${horizon.tStat.toFixed(2).padStart(6)} (naive ${horizon.naiveTStat.toFixed(2)})  ` +
+        `n=${horizon.sampleSize} over ${horizon.clusters} sym` +
+        (horizon.largestClusterShare >= 0.3
+          ? `, busiest ${(horizon.largestClusterShare * 100).toFixed(0)}%`
+          : ''),
     );
   }
   console.log(`  -> ${result.verdict}\n`);
 }
 
 console.log('Reading these numbers:');
-console.log('  A mean without a t-statistic is an anecdote. |t| below ~2 is noise.');
-console.log('  Nothing here accounts for costs, slippage or capacity, so a positive');
-console.log('  result is permission to test properly — never a reason to trade.\n');
+console.log(`  "net" subtracts a ${roundTripCostPct}% modelled round trip. A gross mean smaller`);
+console.log('  than that is not an edge, however significant it is.');
+console.log('  "t" is clustered by symbol: filings from one company are not independent');
+console.log('  observations, and at +20d their windows overlap. The naive t in brackets');
+console.log('  is what treating them as independent would have claimed.');
+console.log('  A dozen categories are tested at once, so one of them crossing |t|=1.96');
+console.log('  by chance is expected. A surviving result is permission to test');
+console.log('  properly — never a reason to trade.\n');
+
+// --- Evidence book -----------------------------------------------------------
+// Written only when asked for. What the agent does with it is one-sided: a
+// category measured drifting against a long is refused, and nothing in the file
+// can license a trade.
+const out = args.includes('--out') ? (arg('out') ?? config.EVIDENCE_FILE) : undefined;
+if (out) {
+  const book = summariseEvidence(results, {
+    generatedAt: new Date().toISOString(),
+    windowYears: years,
+    ...(benchmarkBars ? { benchmark } : {}),
+    roundTripCostPct,
+    symbols: barsBySymbol.size,
+  });
+  writeEvidenceFile(out, book);
+
+  const blocked = book.categories.filter((c) => c.status === 'adverse');
+  console.log(`Evidence book written to ${out}.`);
+  console.log(
+    blocked.length === 0
+      ? '  Nothing measured drifting against a long, so the agent gains no new veto.\n'
+      : `  The agent will now refuse: ${blocked.map((c) => `${c.category} (${c.eventType ?? 'unmapped'})`).join(', ')}\n`,
+  );
+}
 
 process.exit(0);

@@ -23,15 +23,22 @@ import type { Bar } from '../domain/types.js';
  *  - **Abnormal** return, not raw: the benchmark's return over the identical
  *    window is subtracted. Without that, a study run over a bull market
  *    "discovers" that every event type is bullish.
- *  - A t-statistic and the sample size accompany every mean, because a mean
- *    over nine events is not a finding.
+ *  - **Standard errors clustered by symbol.** 2,700 Form 4 filings across 40
+ *    tickers are not 2,700 independent observations: one company's filings
+ *    share that company's whole history, and at a 20-session horizon their
+ *    windows physically overlap. The naive t-statistic treats them as
+ *    independent and is inflated — often by a factor of three or more. Both are
+ *    reported; only the clustered one is allowed to support a verdict.
+ *  - **Net of costs.** A mean of +0.29% is not an edge if the round trip costs
+ *    0.30%. Every mean is reported alongside what survives the cost model.
  *
- * ## What it cannot tell you
+ * ## What it still cannot tell you
  *
- * Correlation over a sample, not a tradeable edge. It ignores costs, slippage,
- * capacity and the fact that a published effect tends to decay once it is
- * known. Treat a positive result as permission to test properly, never as a
- * reason to trade.
+ * Correlation over one sample of one market regime, not a tradeable edge. It
+ * ignores capacity, borrow, the multiple-comparisons problem across the dozen
+ * categories it tests at once, and the fact that a published effect decays once
+ * it is known. Treat a positive result as permission to test properly, never as
+ * a reason to trade.
  */
 
 export interface StudyEvent {
@@ -47,12 +54,27 @@ export interface HorizonResult {
   /** Mean abnormal return, in percent. */
   meanAbnormalPct: number;
   medianAbnormalPct: number;
+  /** Mean abnormal return minus the modelled round-trip cost. */
+  meanNetOfCostsPct: number;
   /** Share of events with a positive abnormal return. */
   hitRate: number;
   /** Standard deviation of abnormal returns, in percent. */
   stdDevPct: number;
-  /** mean / (stdDev / sqrt(n)) — how far the mean is from zero. */
+  /**
+   * mean / (stdDev / sqrt(n)), assuming every observation is independent.
+   * Reported for comparison only — it is the number that makes a concentrated
+   * sample look like a discovery.
+   */
+  naiveTStat: number;
+  /**
+   * The same mean over standard errors clustered by symbol. This is the one
+   * that decides a verdict.
+   */
   tStat: number;
+  /** Distinct symbols contributing observations. */
+  clusters: number;
+  /** Share of observations contributed by the single busiest symbol. */
+  largestClusterShare: number;
   sampleSize: number;
 }
 
@@ -69,8 +91,27 @@ const DEFAULT_HORIZONS = [1, 5, 20];
 /** Below this, a mean is noise regardless of how large it looks. */
 const MIN_SAMPLE_FOR_A_CLAIM = 30;
 
+/**
+ * Below this many distinct symbols, a clustered standard error is itself
+ * unreliable and the "effect" may be one company's five-year run.
+ */
+const MIN_CLUSTERS_FOR_A_CLAIM = 10;
+
 /** |t| above this is conventionally "significant" at ~5% for large samples. */
 const T_THRESHOLD = 1.96;
+
+/**
+ * Round-trip cost of a modelled retail trade, as a percentage of notional:
+ * €1 commission each way on a ~€2,000 position, plus 2.5bp half-spread and
+ * 2.5bp slippage each way. Callers with a real broker schedule should pass
+ * their own.
+ */
+export const DEFAULT_ROUND_TRIP_COST_PCT = 0.3;
+
+interface Observation {
+  symbol: string;
+  abnormalPct: number;
+}
 
 function mean(values: number[]): number {
   return values.length === 0 ? 0 : values.reduce((a, b) => a + b, 0) / values.length;
@@ -88,6 +129,43 @@ function stdDev(values: number[]): number {
   const m = mean(values);
   const variance = values.reduce((sum, v) => sum + (v - m) ** 2, 0) / (values.length - 1);
   return Math.sqrt(variance);
+}
+
+/**
+ * t-statistic for a mean, with standard errors clustered by symbol.
+ *
+ * Var(mean) = G/(G-1) · Σ_g (Σ_{i∈g} eᵢ)² / N², where eᵢ = rᵢ − mean.
+ *
+ * The intuition: within one symbol, residuals are allowed to be arbitrarily
+ * correlated — they are summed before being squared, so a symbol whose filings
+ * all sat on the same multi-year drift contributes one large deviation rather
+ * than hundreds of small independent ones. With one cluster per observation
+ * this reduces to the ordinary t-statistic.
+ */
+function clusteredTStat(observations: Observation[]): number {
+  const n = observations.length;
+  if (n < 2) return 0;
+
+  const m = mean(observations.map((o) => o.abnormalPct));
+
+  const residualSumBySymbol = new Map<string, number>();
+  for (const observation of observations) {
+    residualSumBySymbol.set(
+      observation.symbol,
+      (residualSumBySymbol.get(observation.symbol) ?? 0) + (observation.abnormalPct - m),
+    );
+  }
+
+  const groups = residualSumBySymbol.size;
+  if (groups < 2) return 0;
+
+  let sumOfSquaredClusterResiduals = 0;
+  for (const sum of residualSumBySymbol.values()) sumOfSquaredClusterResiduals += sum ** 2;
+
+  const variance = (groups / (groups - 1)) * (sumOfSquaredClusterResiduals / n ** 2);
+  if (!(variance > 0)) return 0;
+
+  return m / Math.sqrt(variance);
 }
 
 /** Index of the first bar strictly after `at`. The entry bar. */
@@ -118,11 +196,17 @@ export interface EventStudyInput {
   /** Benchmark bars, used to subtract the market's move over the same window. */
   benchmarkBars?: Bar[];
   horizons?: number[];
+  /**
+   * Round-trip cost as a percentage of notional, subtracted from every mean.
+   * Defaults to a modelled retail round trip.
+   */
+  roundTripCostPct?: number;
 }
 
 export function runEventStudy(input: EventStudyInput): CategoryResult[] {
   const horizons = input.horizons ?? DEFAULT_HORIZONS;
-  const byCategory = new Map<string, Map<number, number[]>>();
+  const costPct = input.roundTripCostPct ?? DEFAULT_ROUND_TRIP_COST_PCT;
+  const byCategory = new Map<string, Map<number, Observation[]>>();
 
   for (const event of input.events) {
     const bars = input.barsBySymbol.get(event.symbol);
@@ -146,9 +230,9 @@ export function runEventStudy(input: EventStudyInput): CategoryResult[] {
         abnormal = raw - benchmark;
       }
 
-      const perHorizon = byCategory.get(event.category) ?? new Map<number, number[]>();
+      const perHorizon = byCategory.get(event.category) ?? new Map<number, Observation[]>();
       const bucket = perHorizon.get(sessions) ?? [];
-      bucket.push(abnormal);
+      bucket.push({ symbol: event.symbol, abnormalPct: abnormal });
       perHorizon.set(sessions, bucket);
       byCategory.set(event.category, perHorizon);
     }
@@ -160,29 +244,42 @@ export function runEventStudy(input: EventStudyInput): CategoryResult[] {
     const horizonResults: HorizonResult[] = [];
 
     for (const sessions of horizons) {
-      const values = perHorizon.get(sessions) ?? [];
+      const observations = perHorizon.get(sessions) ?? [];
+      const values = observations.map((o) => o.abnormalPct);
       const n = values.length;
       const m = mean(values);
       const sd = stdDev(values);
-      const tStat = n > 1 && sd > 0 ? m / (sd / Math.sqrt(n)) : 0;
+      const naive = n > 1 && sd > 0 ? m / (sd / Math.sqrt(n)) : 0;
+
+      const countBySymbol = new Map<string, number>();
+      for (const observation of observations) {
+        countBySymbol.set(observation.symbol, (countBySymbol.get(observation.symbol) ?? 0) + 1);
+      }
+      const largest = Math.max(0, ...countBySymbol.values());
 
       horizonResults.push({
         sessions,
         meanAbnormalPct: Number(m.toFixed(4)),
         medianAbnormalPct: Number(median(values).toFixed(4)),
+        // The agent only ever goes long, so the cost is a straight subtraction:
+        // a negative drift is not a short opportunity here, it is just worse.
+        meanNetOfCostsPct: Number((m - costPct).toFixed(4)),
         hitRate: n === 0 ? 0 : Number((values.filter((v) => v > 0).length / n).toFixed(3)),
         stdDevPct: Number(sd.toFixed(4)),
-        tStat: Number(tStat.toFixed(3)),
+        naiveTStat: Number(naive.toFixed(3)),
+        tStat: Number(clusteredTStat(observations).toFixed(3)),
+        clusters: countBySymbol.size,
+        largestClusterShare: n === 0 ? 0 : Number((largest / n).toFixed(3)),
         sampleSize: n,
       });
     }
 
-    const largest = Math.max(...horizonResults.map((h) => h.sampleSize), 0);
+    const largestSample = Math.max(...horizonResults.map((h) => h.sampleSize), 0);
     results.push({
       category,
-      sampleSize: largest,
+      sampleSize: largestSample,
       horizons: horizonResults,
-      verdict: verdictFor(largest, horizonResults),
+      verdict: verdictFor(largestSample, horizonResults, costPct),
     });
   }
 
@@ -192,26 +289,43 @@ export function runEventStudy(input: EventStudyInput): CategoryResult[] {
 /**
  * The plain-language reading.
  *
- * Deliberately reluctant. The default answer is "no evidence", and it takes
- * both a real sample and a real t-statistic to say anything else — because the
- * failure mode this whole project guards against is a number that reads like a
- * finding.
+ * Deliberately reluctant. The default answer is "no evidence", and it takes a
+ * real sample, a real spread of symbols and a real clustered t-statistic to say
+ * anything else — because the failure mode this whole project guards against is
+ * a number that reads like a finding.
+ *
+ * A surviving effect is then stated net of costs, because "significant" and
+ * "worth trading" are different claims and only the second one matters.
  */
-function verdictFor(sampleSize: number, horizons: HorizonResult[]): string {
+function verdictFor(sampleSize: number, horizons: HorizonResult[], costPct: number): string {
   if (sampleSize === 0) return 'no usable observations';
   if (sampleSize < MIN_SAMPLE_FOR_A_CLAIM) {
     return `only ${sampleSize} observations — too few to conclude anything, whatever the means look like`;
   }
 
-  const significant = horizons.filter((h) => Math.abs(h.tStat) >= T_THRESHOLD && h.sampleSize >= MIN_SAMPLE_FOR_A_CLAIM);
+  const clusters = Math.max(...horizons.map((h) => h.clusters), 0);
+  if (clusters < MIN_CLUSTERS_FOR_A_CLAIM) {
+    return `${sampleSize} observations but only ${clusters} distinct symbol(s) — this could be one company's history, not an effect`;
+  }
+
+  const significant = horizons.filter(
+    (h) =>
+      Math.abs(h.tStat) >= T_THRESHOLD &&
+      h.sampleSize >= MIN_SAMPLE_FOR_A_CLAIM &&
+      h.clusters >= MIN_CLUSTERS_FOR_A_CLAIM,
+  );
   if (significant.length === 0) {
     return `no abnormal drift distinguishable from noise across ${sampleSize} observations`;
   }
 
   return significant
-    .map(
-      (h) =>
-        `+${h.sessions}d: ${h.meanAbnormalPct > 0 ? '+' : ''}${h.meanAbnormalPct}% abnormal (t=${h.tStat}, n=${h.sampleSize})`,
-    )
+    .map((h) => {
+      const sign = h.meanAbnormalPct > 0 ? '+' : '';
+      const head = `+${h.sessions}d: ${sign}${h.meanAbnormalPct}% abnormal (t=${h.tStat} clustered over ${h.clusters} symbols, n=${h.sampleSize})`;
+      if (h.meanAbnormalPct < 0) return `${head} — moves AGAINST a long`;
+      return h.meanAbnormalPct <= costPct
+        ? `${head} — smaller than the ${costPct}% round trip, so not tradeable`
+        : `${head}, ${h.meanNetOfCostsPct}% net of costs`;
+    })
     .join(' · ');
 }

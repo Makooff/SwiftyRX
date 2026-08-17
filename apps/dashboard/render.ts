@@ -49,6 +49,22 @@ export interface DashboardData {
   settings: Array<{ label: string; value: string; note?: string }>;
   /** Stop, target and deadline for each open position. */
   exitPlans: Array<{ symbol: string; stopPrice: number; takeProfitPrice: number; expiresAt: string }>;
+  /** What the event study measured, when one has been run. */
+  evidence?: {
+    generatedAt: string;
+    windowYears: number;
+    symbols: number;
+    benchmark?: string;
+    roundTripCostPct: number;
+    categories: Array<{
+      category: string;
+      eventType?: string;
+      status: string;
+      sampleSize: number;
+      clusters: number;
+      horizon?: { sessions: number; meanAbnormalPct: number; meanNetOfCostsPct: number; tStat: number };
+    }>;
+  };
   llmProvider: string;
 }
 
@@ -261,6 +277,27 @@ export function renderDashboard(data: DashboardData): string {
           .join('')
       : '<tr><td colspan="4" class="empty">No open positions</td></tr>';
 
+  const evidenceRows = (data.evidence?.categories ?? [])
+    .map((entry) => {
+      const tone =
+        entry.status === 'adverse' ? 'neg' : entry.status === 'supported' ? 'pos' : 'muted';
+      const drift = entry.horizon
+        ? `${entry.horizon.meanAbnormalPct > 0 ? '+' : ''}${entry.horizon.meanAbnormalPct}% @+${entry.horizon.sessions}d (t=${entry.horizon.tStat})`
+        : '—';
+      const net = entry.horizon
+        ? `${entry.horizon.meanNetOfCostsPct > 0 ? '+' : ''}${entry.horizon.meanNetOfCostsPct}%`
+        : '—';
+      return `<tr>
+        <td class="mono">${escapeHtml(entry.category)}</td>
+        <td class="muted">${escapeHtml(entry.eventType ?? 'not classified')}</td>
+        <td class="${tone}">${escapeHtml(entry.status)}</td>
+        <td class="mono">${escapeHtml(drift)}</td>
+        <td class="mono ${entry.horizon && entry.horizon.meanNetOfCostsPct > 0 ? 'pos' : 'muted'}">${escapeHtml(net)}</td>
+        <td class="muted">${entry.sampleSize} / ${entry.clusters} sym</td>
+      </tr>`;
+    })
+    .join('');
+
   const healthRows =
     data.health.length > 0
       ? data.health
@@ -348,6 +385,28 @@ export function renderDashboard(data: DashboardData): string {
       Checked once per cycle against our own marks — these are not resting orders at the
       broker, so a gap can fill worse than the stop.
     </p>
+  </section>
+
+  <section>
+    <h2>Evidence</h2>
+    ${
+      data.evidence
+        ? `<div class="scroll"><table>
+      <thead><tr><th>Filing</th><th>Event type</th><th>Status</th><th>Abnormal drift</th><th>Net of costs</th><th>n / symbols</th></tr></thead>
+      <tbody>${evidenceRows}</tbody>
+    </table></div>
+    <p class="muted" style="margin:10px 0 0;font-size:12px">
+      From <span class="mono">npm run study</span> over ${data.evidence.windowYears}y and
+      ${data.evidence.symbols} symbols${data.evidence.benchmark ? `, abnormal vs ${escapeHtml(data.evidence.benchmark)}` : ', NOT market-adjusted'},
+      net of a ${data.evidence.roundTripCostPct}% round trip. Generated
+      ${escapeHtml(data.evidence.generatedAt.slice(0, 10))}.
+      A red row is refused outright; a green one is <em>not</em> a licence — it is one
+      sample of one regime, and the ordinary gates still decide it.
+    </p>`
+        : `<div class="empty">No study has been run. Nothing is being blocked on evidence.<br>
+      <span class="mono">npm run study -- --years 5 --out</span> measures whether these filings
+      are followed by any abnormal move at all, and writes what it finds here.</div>`
+    }
   </section>
 
   <section>
