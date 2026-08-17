@@ -55,6 +55,7 @@ function buildDashboardData(agent: TradingAgent, config: AppConfig): DashboardDa
     orders: agent.getOrders(),
     health: agent.getHealth(),
     agent: agent.getState(),
+    activity: agent.getActivity(120),
     llmProvider: agent.getLlmProviderId(),
   };
 }
@@ -108,6 +109,8 @@ export function createApiServer(options: ApiServerOptions): Server {
             sources: health,
           });
         }
+        case '/api/activity':
+          return json(200, agent.getActivity(200));
         case '/api/metrics':
           return json(200, metrics.snapshot());
         default:

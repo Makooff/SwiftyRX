@@ -29,6 +29,7 @@ import {
   DiscordNotifier,
   type ApprovalOutcome,
 } from '../../src/monitoring/discord.js';
+import { ActivityLog, type ActivityEntry } from '../../src/monitoring/activity-log.js';
 import { metrics } from '../../src/monitoring/metrics.js';
 import { RiskEngine } from '../../src/risk/engine.js';
 import type { RiskDecision } from '../../src/risk/types.js';
@@ -101,6 +102,7 @@ export class TradingAgent {
   private readonly llm: LLMProvider;
   private readonly generator: SignalGenerator;
   private readonly eventStore = new MemoryEventStore();
+  readonly activity: ActivityLog;
 
   private readonly recentSignals: Signal[] = [];
   private readonly recentEvents: MarketEvent[] = [];
@@ -134,6 +136,7 @@ export class TradingAgent {
         : new NullLLMProvider());
 
     this.generator = new SignalGenerator(this.llm, this.log);
+    this.activity = new ActivityLog({ clock: this.clock });
 
     this.discord =
       options.discord ??
@@ -274,6 +277,11 @@ export class TradingAgent {
     return [...this.recentOrders];
   }
 
+  /** Recent activity, newest first — what the agent has been doing. */
+  getActivity(limit = 100): ActivityEntry[] {
+    return this.activity.recent(limit);
+  }
+
   getHealth(): HealthReport[] {
     return [...this.lastHealth];
   }
@@ -288,6 +296,7 @@ export class TradingAgent {
   }
 
   private recordError(stage: string, message: string): void {
+    this.activity.error(stage, message);
     this.state.errors.unshift({ at: this.clock.now().toISOString(), stage, message });
     this.state.errors = this.state.errors.slice(0, 25);
   }
@@ -340,6 +349,7 @@ export class TradingAgent {
     this.state.haltReasons = halts.map((h) => h.message);
     if (halts.length > 0) {
       this.log.warn({ reasons: this.state.haltReasons }, 'trading halted this cycle');
+      this.activity.warn('halt', this.state.haltReasons.join(' · '));
       // Announced on the transition only. A halt lasts the rest of the day, so
       // notifying every cycle would be one message a minute until midnight.
       if (!wasHalted) await this.announceHalt(this.state.haltReasons);
@@ -354,6 +364,9 @@ export class TradingAgent {
       });
       documents = result.documents;
       this.state.documentsIngested += result.stats.kept;
+      if (result.stats.kept > 0) {
+        this.activity.info('ingest', `${result.stats.kept} new document(s)`);
+      }
       for (const failure of result.stats.failures) {
         this.recordError('ingestion', `${failure.adapter}: ${failure.error}`);
       }
@@ -373,6 +386,12 @@ export class TradingAgent {
       const detection = await detectEvents(documents, this.eventStore, { clock: this.clock });
       events = detection.events;
       this.state.eventsDetected += detection.stats.newEvents;
+      for (const detected of events.slice(0, 5)) {
+        this.activity.info(
+          'event',
+          `${detected.type} · ${detected.verification.status} · materiality ${detected.materiality.toFixed(2)} — ${detected.headline.slice(0, 120)}`,
+        );
+      }
       this.recentEvents.unshift(...events.slice(0, 10));
       this.recentEvents.splice(50);
     } catch (err) {
@@ -381,6 +400,11 @@ export class TradingAgent {
     }
 
     const candidates = eventsWorthAnalysing(events);
+    if (events.length > 0 && candidates.length === 0) {
+      // The most common reason nothing trades, and previously invisible: the
+      // events were real but not worth spending an LLM call on.
+      this.activity.info('gate', `${events.length} event(s), none cleared the analysis gate`);
+    }
     if (candidates.length === 0) return;
 
     // --- Analyse, score, decide -------------------------------------------
@@ -454,12 +478,23 @@ export class TradingAgent {
 
     if (!signal) {
       this.log.debug({ eventId: event.id, skipped }, 'no signal produced');
+      // The reason no signal came out is the most useful line in the feed: it
+      // separates "the model failed" from "the model looked and declined".
+      this.activity.record(
+        skipped?.startsWith('llm error') ? 'error' : 'info',
+        'no-signal',
+        `${event.type}: ${skipped ?? 'no hypothesis'}`,
+      );
       return;
     }
 
     this.state.signalsGenerated += 1;
     this.recentSignals.unshift(signal);
     this.recentSignals.splice(50);
+    this.activity.good(
+      'signal',
+      `${signal.action} ${signal.asset} · score ${signal.score.toFixed(3)} · ${signal.catalyst.slice(0, 100)}`,
+    );
 
     // --- Risk ------------------------------------------------------------
     let riskDecision: RiskDecision | undefined;
@@ -507,6 +542,10 @@ export class TradingAgent {
             reason: `signal ${signal.id}: ${signal.catalyst}`.slice(0, 200),
           });
           this.state.ordersPlaced += 1;
+          this.activity.good(
+            'order',
+            `${order.side.toUpperCase()} ${order.filledQuantity} ${order.symbol} @ ${order.filledPrice?.toFixed(4) ?? '?'} — ${order.status}`,
+          );
           this.recentOrders.unshift(order);
           this.recentOrders.splice(50);
           await this.discord?.order(order, signal);
@@ -515,6 +554,13 @@ export class TradingAgent {
         }
       } else if (riskDecision.verdict !== 'approved') {
         this.state.ordersRejectedByRisk += 1;
+        // A refusal is the risk engine working, so it is logged as information
+        // rather than as a fault — with the rule that fired, which is the part
+        // worth reading.
+        this.activity.warn(
+          'risk',
+          `refused ${signal.action} ${signal.asset}: ${riskDecision.rejections.map((r) => r.rule).join(', ')}`,
+        );
       }
     }
 

@@ -2,6 +2,7 @@ import type { HealthReport } from '../../src/domain/types.js';
 import type { Order } from '../../src/execution/broker/types.js';
 import type { MarketEvent } from '../../src/intelligence/types.js';
 import type { Signal } from '../../src/strategy/signals/types.js';
+import type { ActivityEntry } from '../../src/monitoring/activity-log.js';
 import type { AgentState } from '../worker/agent.js';
 
 /**
@@ -43,6 +44,7 @@ export interface DashboardData {
   orders: Order[];
   health: HealthReport[];
   agent: AgentState;
+  activity: ActivityEntry[];
   llmProvider: string;
 }
 
@@ -106,6 +108,21 @@ summary { cursor: pointer; color: var(--accent); font-size: 13px; }
 ul { margin: 6px 0 0; padding-left: 18px; }
 .notice { border-left: 3px solid var(--warn); padding: 8px 12px; background: #21201a;
   border-radius: 4px; margin-bottom: 14px; }
+/* Activity feed: monospace and dense, because it is read by scanning rather
+   than by reading. Capped in height so it never pushes the portfolio off the
+   screen — the log is context, not the headline. */
+.feed { max-height: 460px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; line-height: 1.7; }
+.feed .row { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid #171c22; }
+.feed .row:last-child { border-bottom: none; }
+.feed time { color: var(--muted); flex: none; }
+.feed .stage { flex: none; width: 62px; text-transform: uppercase; font-size: 10px;
+  letter-spacing: .04em; padding-top: 1px; }
+.feed .msg { flex: 1; word-break: break-word; }
+.lv-info .stage { color: var(--accent); }
+.lv-good .stage { color: var(--pos); }
+.lv-warn .stage { color: var(--warn); }
+.lv-error .stage { color: var(--neg); }
 `;
 
 export function renderDashboard(data: DashboardData): string {
@@ -202,6 +219,20 @@ export function renderDashboard(data: DashboardData): string {
           .join('')
       : '<tr><td colspan="7" class="empty">No orders placed</td></tr>';
 
+  const activityRows =
+    data.activity.length > 0
+      ? data.activity
+          .slice(0, 120)
+          .map(
+            (entry) => `<div class="row lv-${escapeHtml(entry.level)}">
+        <time>${escapeHtml(entry.at.slice(11, 19))}</time>
+        <span class="stage">${escapeHtml(entry.stage)}</span>
+        <span class="msg">${escapeHtml(entry.message)}</span>
+      </div>`,
+          )
+          .join('')
+      : '<div class="empty">Nothing yet. The first entries appear on the next cycle.</div>';
+
   const healthRows =
     data.health.length > 0
       ? data.health
@@ -278,6 +309,11 @@ export function renderDashboard(data: DashboardData): string {
       </table></div>
     </section>
   </div>
+
+  <section>
+    <h2>Activity</h2>
+    <div class="feed">${activityRows}</div>
+  </section>
 
   <section>
     <h2>System health</h2>
