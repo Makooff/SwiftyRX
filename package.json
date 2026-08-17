@@ -22,7 +22,8 @@
     "events:detect": "tsx scripts/detect-events.ts",
     "paper": "tsx scripts/paper.ts",
     "backtest": "tsx scripts/backtest.ts",
-    "dashboard": "tsx scripts/dashboard.ts"
+    "dashboard": "tsx scripts/dashboard.ts",
+    "study": "tsx scripts/event-study.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
