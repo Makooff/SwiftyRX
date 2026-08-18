@@ -118,8 +118,12 @@ const MIN_CLUSTERS_FOR_A_CLAIM = 10;
 /**
  * A test must clear this before it is even *considered* — the conventional 5%
  * cutoff. Clearing it is no longer sufficient: see FDR_Q.
+ *
+ * Exported because the evidence book applies it directly when deciding to
+ * *refuse* a category. Restating 1.96 there would be a second copy of this
+ * standard, free to drift from this one.
  */
-const T_THRESHOLD = 1.96;
+export const T_THRESHOLD = 1.96;
 
 /**
  * Benjamini-Hochberg level. At q=0.10, at most one in ten reported findings is
