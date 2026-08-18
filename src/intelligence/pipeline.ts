@@ -158,23 +158,51 @@ export async function detectEvents(
   };
 }
 
+export interface AnalysisGateResult {
+  kept: MarketEvent[];
+  /** Why the rest were dropped, reason -> count. Empty when nothing was dropped. */
+  droppedByReason: Record<string, number>;
+}
+
 /**
  * Events worth passing to Phase 3 analysis.
  *
  * A deliberately blunt gate: contradicted events never proceed, and everything
  * else must clear both a materiality and a confidence floor. Its purpose is to
  * avoid spending LLM calls on noise, not to decide anything about trading.
+ *
+ * Returns the drop reason alongside the survivors, from the same pass over
+ * the same events, so the reported reasons can never drift from what the
+ * filter actually did — a filter and a separately-computed explanation of it
+ * are two implementations of one rule, and two implementations disagree
+ * eventually.
  */
-export function eventsWorthAnalysing(
+export function evaluateAnalysisGate(
   events: MarketEvent[],
   options: { minMateriality?: number; minConfidence?: number } = {},
-): MarketEvent[] {
+): AnalysisGateResult {
   const minMateriality = options.minMateriality ?? 0.4;
   const minConfidence = options.minConfidence ?? 0.5;
 
-  return events.filter((event) => {
-    if (event.verification.status === 'contradicted') return false;
-    if (event.type === 'unclassified') return false;
-    return event.materiality >= minMateriality && event.verification.confidence >= minConfidence;
-  });
+  const kept: MarketEvent[] = [];
+  const droppedByReason: Record<string, number> = {};
+  const drop = (reason: string) => {
+    droppedByReason[reason] = (droppedByReason[reason] ?? 0) + 1;
+  };
+
+  for (const event of events) {
+    if (event.verification.status === 'contradicted') {
+      drop('contradicted');
+    } else if (event.type === 'unclassified') {
+      drop('unclassified');
+    } else if (event.materiality < minMateriality) {
+      drop(`materiality below ${minMateriality}`);
+    } else if (event.verification.confidence < minConfidence) {
+      drop(`confidence below ${minConfidence}`);
+    } else {
+      kept.push(event);
+    }
+  }
+
+  return { kept, droppedByReason };
 }

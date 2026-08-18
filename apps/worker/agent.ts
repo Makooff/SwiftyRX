@@ -22,7 +22,7 @@ import { MemoryEventStore } from '../../src/intelligence/event-store.js';
 import { AnthropicProvider } from '../../src/intelligence/llm/anthropic.js';
 import { NullLLMProvider } from '../../src/intelligence/llm/null.js';
 import type { LLMProvider } from '../../src/intelligence/llm/types.js';
-import { detectEvents, eventsWorthAnalysing } from '../../src/intelligence/pipeline.js';
+import { detectEvents, evaluateAnalysisGate } from '../../src/intelligence/pipeline.js';
 import type { MarketEvent } from '../../src/intelligence/types.js';
 import {
   DiscordApprover,
@@ -30,6 +30,7 @@ import {
   type ApprovalOutcome,
 } from '../../src/monitoring/discord.js';
 import { ActivityLog, type ActivityEntry } from '../../src/monitoring/activity-log.js';
+import { CycleFunnelBuilder, CycleFunnelHistory, type CycleFunnel } from '../../src/monitoring/cycle-funnel.js';
 import { metrics } from '../../src/monitoring/metrics.js';
 import { RiskEngine } from '../../src/risk/engine.js';
 import { PositionManager } from '../../src/risk/position-manager.js';
@@ -110,6 +111,8 @@ export class TradingAgent {
   private readonly generator: SignalGenerator;
   private readonly eventStore = new MemoryEventStore();
   readonly activity: ActivityLog;
+  /** Last cycles' funnels — how far each got, and why it stopped there. */
+  readonly funnels: CycleFunnelHistory;
   /** Exit plans — the stops the sizing already assumed. */
   readonly positions: PositionManager;
   /** What the study measured, when a study has been run. */
@@ -148,6 +151,7 @@ export class TradingAgent {
 
     this.generator = new SignalGenerator(this.llm, this.log);
     this.activity = new ActivityLog({ clock: this.clock });
+    this.funnels = new CycleFunnelHistory();
     this.positions = new PositionManager({ clock: this.clock });
     this.evidence = options.evidence ?? EvidenceBook.load(options.config.EVIDENCE_FILE);
 
@@ -303,6 +307,11 @@ export class TradingAgent {
     return this.activity.recent(limit);
   }
 
+  /** Recent cycle funnels, newest first — how far each cycle got, and why it stopped there. */
+  getFunnels(limit?: number): CycleFunnel[] {
+    return this.funnels.recent(limit);
+  }
+
   getHealth(): HealthReport[] {
     return [...this.lastHealth];
   }
@@ -418,7 +427,23 @@ export class TradingAgent {
     const cycleStart = this.clock.nowMs();
     this.state.cycles += 1;
     this.state.lastCycleAt = this.clock.now().toISOString();
+    const funnel = new CycleFunnelBuilder(this.state.cycles, this.state.lastCycleAt);
 
+    try {
+      await this.runFunnelledCycle(options, cycleStart, funnel);
+    } finally {
+      // Recorded on every exit, early or not — a funnel that only appeared
+      // after a full run would say nothing about the runs that stopped early,
+      // which is exactly the cycles an operator most needs explained.
+      this.funnels.record(funnel.finish(this.clock.now().toISOString()));
+    }
+  }
+
+  private async runFunnelledCycle(
+    options: { since?: Date },
+    cycleStart: number,
+    funnel: CycleFunnelBuilder,
+  ): Promise<void> {
     const marks = await this.markPositions();
     // Before anything else, and regardless of halts: a halt stops new risk
     // being taken, never the closing of risk already on the books.
@@ -450,11 +475,15 @@ export class TradingAgent {
       if (result.stats.kept > 0) {
         this.activity.info('ingest', `${result.stats.kept} new document(s)`);
       }
+      const failuresByAdapter: Record<string, number> = {};
       for (const failure of result.stats.failures) {
         this.recordError('ingestion', `${failure.adapter}: ${failure.error}`);
+        failuresByAdapter[failure.adapter] = (failuresByAdapter[failure.adapter] ?? 0) + 1;
       }
+      funnel.step('ingest', documents.length, failuresByAdapter);
     } catch (err) {
       this.recordError('ingestion', (err as Error).message);
+      funnel.step('ingest', 0, { 'ingestion failed': 1 });
       return;
     }
 
@@ -477,12 +506,19 @@ export class TradingAgent {
       }
       this.recentEvents.unshift(...events.slice(0, 10));
       this.recentEvents.splice(50);
+      funnel.step(
+        'events',
+        events.length,
+        detection.stats.contradicted > 0 ? { contradicted: detection.stats.contradicted } : undefined,
+      );
     } catch (err) {
       this.recordError('event_detection', (err as Error).message);
+      funnel.step('events', 0, { 'detection failed': 1 });
       return;
     }
 
-    const worthAnalysing = eventsWorthAnalysing(events);
+    const { kept: worthAnalysing, droppedByReason: gateDrops } = evaluateAnalysisGate(events);
+    funnel.step('analysis_gate', worthAnalysing.length, gateDrops);
     if (events.length > 0 && worthAnalysing.length === 0) {
       // The most common reason nothing trades, and previously invisible: the
       // events were real but not worth spending an LLM call on.
@@ -493,9 +529,11 @@ export class TradingAgent {
     // dropped here rather than analysed and then rejected downstream: paying
     // for an LLM call to interpret an event we have measured as a losing entry
     // is the most expensive way to reach the same "no".
+    const evidenceDrops: Record<string, number> = {};
     const candidates = worthAnalysing.filter((candidate) => {
       const blocked = this.evidence?.blocks(candidate.type);
       if (!blocked) return true;
+      evidenceDrops[blocked.category] = (evidenceDrops[blocked.category] ?? 0) + 1;
       this.activity.record(
         'warn',
         'evidence',
@@ -504,15 +542,64 @@ export class TradingAgent {
       );
       return false;
     });
+    funnel.step('evidence_gate', candidates.length, evidenceDrops);
 
     if (candidates.length === 0) return;
 
     // --- Analyse, score, decide -------------------------------------------
-    for (const event of candidates.slice(0, 5)) {
+    const analysed = candidates.slice(0, 5);
+    funnel.step(
+      'analysed',
+      analysed.length,
+      candidates.length > analysed.length
+        ? { 'not processed — top 5 only': candidates.length - analysed.length }
+        : undefined,
+    );
+
+    // Signal/risk/order outcomes are read back from AgentState's own counters
+    // rather than threaded through processEvent's return value: they are
+    // already incremented in exactly the right places, and a second, parallel
+    // way of counting the same thing is a second way for the two to disagree.
+    const signalsBefore = this.state.signalsGenerated;
+    const ordersBefore = this.state.ordersPlaced;
+    const riskRejectedBefore = this.state.ordersRejectedByRisk;
+    const approvalRejectedBefore = this.state.ordersRejectedByApproval;
+
+    for (const event of analysed) {
       try {
         await this.processEvent(event, documents);
       } catch (err) {
         this.recordError('analysis', `${event.id}: ${(err as Error).message}`);
+      }
+    }
+
+    const signalsCount = this.state.signalsGenerated - signalsBefore;
+    funnel.step(
+      'signals',
+      signalsCount,
+      analysed.length > signalsCount ? { 'no signal': analysed.length - signalsCount } : undefined,
+    );
+
+    if (signalsCount > 0) {
+      const riskRejected = this.state.ordersRejectedByRisk - riskRejectedBefore;
+      const approvalRejected = this.state.ordersRejectedByApproval - approvalRejectedBefore;
+      const ordersCount = this.state.ordersPlaced - ordersBefore;
+      const riskApproved = ordersCount + approvalRejected;
+      // Never reached the Risk Engine at all: no symbol/price to trade on, or
+      // trading was halted this cycle.
+      const notEvaluated = signalsCount - riskApproved - riskRejected;
+
+      const riskReasons: Record<string, number> = {};
+      if (riskRejected > 0) riskReasons['risk rejected'] = riskRejected;
+      if (notEvaluated > 0) riskReasons['not tradeable or halted'] = notEvaluated;
+      funnel.step('risk', riskApproved, riskReasons);
+
+      if (riskApproved > 0) {
+        funnel.step(
+          'orders',
+          ordersCount,
+          approvalRejected > 0 ? { 'approval rejected': approvalRejected } : undefined,
+        );
       }
     }
 

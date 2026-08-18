@@ -23,7 +23,8 @@
     "paper": "tsx scripts/paper.ts",
     "backtest": "tsx scripts/backtest.ts",
     "dashboard": "tsx scripts/dashboard.ts",
-    "study": "tsx scripts/event-study.ts"
+    "study": "tsx scripts/event-study.ts",
+    "snapshot": "tsx scripts/snapshot.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",

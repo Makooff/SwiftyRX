@@ -7,7 +7,7 @@ import { classifyDocument, materialityOf } from '../src/intelligence/event_detec
 import { clusterDocuments } from '../src/intelligence/event_detector/clustering.js';
 import { resolveEntities, tickersFromEntities } from '../src/intelligence/entity_resolution/resolver.js';
 import { MemoryEventStore } from '../src/intelligence/event-store.js';
-import { detectEvents, eventsWorthAnalysing } from '../src/intelligence/pipeline.js';
+import { detectEvents, evaluateAnalysisGate } from '../src/intelligence/pipeline.js';
 import { verifyCluster } from '../src/intelligence/verification/verifier.js';
 import type { EventCluster } from '../src/intelligence/types.js';
 
@@ -510,7 +510,9 @@ describe('detectEvents', () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.verification.confidence).toBeLessThanOrEqual(0.35);
     // The single most important guarantee in this phase.
-    expect(eventsWorthAnalysing(events)).toHaveLength(0);
+    const gate = evaluateAnalysisGate(events);
+    expect(gate.kept).toHaveLength(0);
+    expect(gate.droppedByReason).toMatchObject({ 'confidence below 0.5': 1 });
   });
 
   it('excludes contradicted events from analysis', async () => {
@@ -529,7 +531,9 @@ describe('detectEvents', () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.type).toBe('m_and_a');
     expect(events[0]!.verification.status).toBe('contradicted');
-    expect(eventsWorthAnalysing(events)).toHaveLength(0);
+    const gate = evaluateAnalysisGate(events);
+    expect(gate.kept).toHaveLength(0);
+    expect(gate.droppedByReason).toMatchObject({ contradicted: 1 });
   });
 
   it('passes a confirmed, material event to analysis', async () => {
@@ -546,8 +550,9 @@ describe('detectEvents', () => {
       { clock },
     );
 
-    const worth = eventsWorthAnalysing(events);
-    expect(worth).toHaveLength(1);
-    expect(worth[0]!.type).toBe('monetary_policy');
+    const gate = evaluateAnalysisGate(events);
+    expect(gate.kept).toHaveLength(1);
+    expect(gate.kept[0]!.type).toBe('monetary_policy');
+    expect(gate.droppedByReason).toEqual({});
   });
 });

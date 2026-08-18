@@ -5,6 +5,7 @@ import { redact } from '../../src/core/redact.js';
 import { metrics } from '../../src/monitoring/metrics.js';
 import { renderDashboard, type DashboardData } from '../dashboard/render.js';
 import type { TradingAgent } from '../worker/agent.js';
+import { buildSnapshot } from '../worker/snapshot.js';
 import { assertExposureIsSafe, authorise } from './auth.js';
 
 /**
@@ -77,6 +78,8 @@ function buildDashboardData(agent: TradingAgent, config: AppConfig): DashboardDa
         unrealisedPnl: position.unrealisedPnl,
       })),
     },
+    funnels: agent.getFunnels(),
+    ...(agent.cycleAgeSeconds() !== undefined ? { cycleAgeSeconds: agent.cycleAgeSeconds() } : {}),
     signals: agent.getSignals(),
     events: agent.getEvents(),
     orders: agent.getOrders(),
@@ -148,6 +151,8 @@ export function createApiServer(options: ApiServerOptions): Server {
           return json(200, settingsRows(config));
         case '/api/exits':
           return json(200, agent.positions.serialize());
+        case '/api/funnels':
+          return json(200, agent.getFunnels());
         case '/api/evidence':
           // No study run is not an error — it is the honest state of having
           // measured nothing yet.
@@ -156,6 +161,8 @@ export function createApiServer(options: ApiServerOptions): Server {
           return json(200, agent.getActivity(200));
         case '/api/metrics':
           return json(200, metrics.snapshot());
+        case '/api/diagnostic':
+          return json(200, buildSnapshot(agent, config));
         default:
           return json(404, { error: 'not found' });
       }
