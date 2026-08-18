@@ -30,6 +30,9 @@ function horizon(overrides: Partial<HorizonResult> = {}): HorizonResult {
     stdDevPct: 8,
     naiveTStat: 9,
     tStat: 3,
+    pValue: 0.005,
+    // The study sets this across the whole run; a fixture states it directly.
+    survivesMultiplicity: true,
     clusters: 30,
     largestClusterShare: 0.1,
     sampleSize: 500,
@@ -96,7 +99,7 @@ describe('summarising a study', () => {
 
   it('marks a large sample with no significant horizon as inconclusive', () => {
     const book = summariseEvidence(
-      [category({ horizons: [horizon({ tStat: 0.4 })] })],
+      [category({ horizons: [horizon({ tStat: 0.4, survivesMultiplicity: false })] })],
       options,
     );
     expect(book.categories[0]!.status).toBe('inconclusive');
@@ -108,6 +111,16 @@ describe('summarising a study', () => {
       options,
     );
     expect(book.categories[0]!.status).toBe('untested');
+  });
+
+  it('will not call a result a finding when it did not survive the run it was in', () => {
+    // The distinction that turned seven "findings" into zero: crossing
+    // |t|=1.96 on its own means little when a hundred tests were run.
+    const book = summariseEvidence(
+      [category({ horizons: [horizon({ tStat: 2.35, survivesMultiplicity: false })] })],
+      options,
+    );
+    expect(book.categories[0]!.status).toBe('inconclusive');
   });
 
   it('lets an adverse horizon decide a category even when another looks good', () => {

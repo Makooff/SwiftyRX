@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { runEventStudy, type StudyEvent } from '../src/backtesting/event-study.js';
+import {
+  multiplicitySummary,
+  runEventStudy,
+  type StudyEvent,
+} from '../src/backtesting/event-study.js';
+import { studentTTwoSidedP } from '../src/backtesting/stats.js';
 import type { Bar } from '../src/domain/types.js';
 
 /**
@@ -213,6 +218,91 @@ describe('event study', () => {
     const horizon = result[0]!.horizons[0]!;
     expect(horizon.meanAbnormalPct).toBeCloseTo(0.1, 3);
     expect(horizon.meanNetOfCostsPct).toBeCloseTo(-0.2, 3);
+  });
+
+  it('does not call a result a finding when it only stands up in isolation', () => {
+    // The correction that turned the first full run's seven "findings" into
+    // zero. One category with a modest real drift, unchanged in both runs — but
+    // in the second it is one of forty-one tests, and a t of 2.67 is no longer
+    // surprising among forty-one tries. Nothing about the effect changed; what
+    // changed is how many other questions were asked alongside it.
+    const real = Array.from({ length: 12 }, (_, i) => `REAL${i}`);
+    const quiet = Array.from({ length: 12 }, (_, i) => `QUIET${i}`);
+
+    const barsBySymbol = new Map<string, Bar[]>();
+    real.forEach((symbol, s) => {
+      barsBySymbol.set(
+        symbol,
+        bars(
+          symbol,
+          Array.from({ length: 90 }, (_, i) =>
+            Number((100 * 1.0004 ** i * (1 + 0.02 * Math.sin(i * 1.7 + s))).toFixed(4)),
+          ),
+        ),
+      );
+    });
+    // Flat: these categories are real tests that found nothing, which is what
+    // most tests do and what the count is supposed to include.
+    for (const symbol of quiet) {
+      barsBySymbol.set(symbol, bars(symbol, Array.from({ length: 90 }, () => 100)));
+    }
+
+    const realEvents = real.flatMap((symbol) =>
+      Array.from({ length: 4 }, (_, i) => event(symbol, i * 5 + 1, 'real')),
+    );
+    const quietEvents = Array.from({ length: 40 }, (_, c) =>
+      quiet.flatMap((symbol) =>
+        Array.from({ length: 4 }, (_, i) => event(symbol, i * 5 + 1, `quiet${c}`)),
+      ),
+    ).flat();
+
+    const alone = runEventStudy({ events: realEvents, barsBySymbol, horizons: [5] });
+    const amongMany = runEventStudy({
+      events: [...realEvents, ...quietEvents],
+      barsBySymbol,
+      horizons: [5],
+    });
+
+    const findReal = (rs: typeof alone) => rs.find((r) => r.category === 'real')!.horizons[0]!;
+    expect(findReal(alone).tStat).toBe(findReal(amongMany).tStat);
+    expect(findReal(alone).survivesMultiplicity).toBe(true);
+    expect(findReal(amongMany).survivesMultiplicity).toBe(false);
+
+    // And it says which of the two it is, rather than falling back to the
+    // wording used when a category showed nothing at all.
+    expect(amongMany.find((r) => r.category === 'real')!.verdict).toMatch(
+      /does not survive the number of tests/,
+    );
+
+    // The quiet forty are counted as tests, which is the whole mechanism.
+    expect(multiplicitySummary(alone).tested).toBe(1);
+    expect(multiplicitySummary(amongMany).tested).toBe(41);
+    expect(multiplicitySummary(amongMany).nominal).toBe(1);
+    expect(multiplicitySummary(amongMany).survivors).toBe(0);
+  });
+
+  it('attaches a p-value on the clusters, not on the observations', () => {
+    // 240 observations from 12 symbols has 11 degrees of freedom, not 239.
+    const symbols = Array.from({ length: 12 }, (_, i) => `SYM${i}`);
+    const barsBySymbol = new Map(
+      symbols.map((symbol, s) => {
+        const closes = Array.from({ length: 90 }, (_, i) =>
+          Number((100 * (1 + s * 0.0008) ** i * (1 + 0.01 * Math.sin(i * 1.7))).toFixed(4)),
+        );
+        return [symbol, bars(symbol, closes)] as const;
+      }),
+    );
+    const result = runEventStudy({
+      events: symbols.flatMap((symbol) =>
+        Array.from({ length: 20 }, (_, i) => event(symbol, i + 1)),
+      ),
+      barsBySymbol,
+      horizons: [5],
+    });
+
+    const h = result[0]!.horizons[0]!;
+    expect(h.clusters).toBe(12);
+    expect(h.pValue).toBeCloseTo(studentTTwoSidedP(h.tStat, 11), 5);
   });
 
   it('computes a naive t-statistic that grows with sample size, not with the mean alone', () => {
