@@ -3,6 +3,7 @@ import type { Order } from '../../src/execution/broker/types.js';
 import type { MarketEvent } from '../../src/intelligence/types.js';
 import type { Signal } from '../../src/strategy/signals/types.js';
 import type { ActivityEntry } from '../../src/monitoring/activity-log.js';
+import { FUNNEL_STAGE_LABELS, type CycleFunnel } from '../../src/monitoring/cycle-funnel.js';
 import type { AgentState } from '../worker/agent.js';
 
 /**
@@ -39,6 +40,10 @@ export interface DashboardData {
       unrealisedPnl: number;
     }>;
   };
+  /** Last cycle's funnel first, then earlier ones — how far each got, and why it stopped there. */
+  funnels: CycleFunnel[];
+  /** Seconds since the last completed cycle. Absent when none has run yet. */
+  cycleAgeSeconds?: number;
   signals: Signal[];
   events: MarketEvent[];
   orders: Order[];
@@ -78,6 +83,32 @@ function escapeHtml(value: unknown): string {
 
 function pnlClass(value: number): string {
   return value > 0 ? 'pos' : value < 0 ? 'neg' : '';
+}
+
+function formatAge(seconds: number | undefined): string {
+  if (seconds === undefined) return 'never run';
+  if (seconds < 60) return `${Math.round(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  return `${Math.round(seconds / 3600)}h ago`;
+}
+
+function funnelReasonsText(reasons: Record<string, number> | undefined): string {
+  if (!reasons) return '';
+  return Object.entries(reasons)
+    .map(([reason, n]) => `${n} ${escapeHtml(reason)}`)
+    .join(', ');
+}
+
+function funnelStepRows(steps: CycleFunnel['steps']): string {
+  return steps
+    .map(
+      (step) => `<tr>
+        <td>${escapeHtml(FUNNEL_STAGE_LABELS[step.stage])}</td>
+        <td class="mono">${step.count}</td>
+        <td class="muted">${funnelReasonsText(step.reasons)}</td>
+      </tr>`,
+    )
+    .join('');
 }
 
 const STYLES = `
@@ -298,6 +329,25 @@ export function renderDashboard(data: DashboardData): string {
     })
     .join('');
 
+  const [latestFunnel, ...previousFunnels] = data.funnels;
+  const funnelSection = latestFunnel
+    ? `<p class="muted" style="margin:0 0 12px">${escapeHtml(latestFunnel.summary)} &middot; last cycle ${formatAge(data.cycleAgeSeconds)}</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Stage</th><th>Count</th><th>Dropped</th></tr></thead>
+      <tbody>${funnelStepRows(latestFunnel.steps)}</tbody>
+    </table></div>
+    ${
+      previousFunnels.length > 0
+        ? `<details><summary>Previous cycles (${previousFunnels.length})</summary><ul>${previousFunnels
+            .map(
+              (f) =>
+                `<li class="muted mono">#${f.cycleId} ${escapeHtml(f.finishedAt.slice(11, 19))} — ${escapeHtml(f.summary)}</li>`,
+            )
+            .join('')}</ul></details>`
+        : ''
+    }`
+    : '<div class="empty">No cycle has run yet.</div>';
+
   const healthRows =
     data.health.length > 0
       ? data.health
@@ -332,6 +382,11 @@ export function renderDashboard(data: DashboardData): string {
           .join('')}</ul></div>`
       : ''
   }
+
+  <section>
+    <h2>Cycle funnel</h2>
+    ${funnelSection}
+  </section>
 
   <section>
     <h2>Portfolio</h2>

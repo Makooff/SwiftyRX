@@ -6,5 +6,5 @@ export { CONTRADICTION_PATTERNS, KEYWORD_RULES, SEC_FORM_RULES, SEC_ITEM_RULES }
 export { verifyCluster } from './verification/verifier.js';
 export { measureMarketReaction } from './verification/market-reaction.js';
 export { MemoryEventStore, type EventStore } from './event-store.js';
-export { detectEvents, eventsWorthAnalysing, type DetectionResult } from './pipeline.js';
+export { detectEvents, evaluateAnalysisGate, type AnalysisGateResult, type DetectionResult } from './pipeline.js';
 export * from './types.js';

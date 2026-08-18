@@ -377,7 +377,71 @@ describe('the evidence gate', () => {
   });
 });
 
+describe('cycle funnel', () => {
+  it('records only an ingest step, with no reasons, when nothing was ingested', async () => {
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    await agent.runCycle();
+
+    const funnel = agent.getFunnels()[0]!;
+    expect(funnel.cycleId).toBe(1);
+    expect(funnel.steps).toEqual([{ stage: 'ingest', count: 0 }]);
+    expect(funnel.summary).toBe('Documents ingested: none.');
+  });
+
+  it('reaches the orders stage when a cycle ends in a filled order', async () => {
+    const documents = [
+      doc(
+        'sec_edgar',
+        'Apple Inc. filed 8-K — Results of Operations',
+        'Form 8-K filed by Apple Inc. Reported items: 2.02.',
+        { form: '8-K', items: ['2.02'] },
+        ['AAPL'],
+      ),
+      doc('outlet_a', 'Apple reports quarterly results above expectations', 'Earnings beat.', {}, ['AAPL']),
+    ];
+    const { agent } = await agentWith(documents, llmReturning(bullishHypothesis));
+    await agent.runCycle();
+
+    const funnel = agent.getFunnels()[0]!;
+    const stages = funnel.steps.map((s) => s.stage);
+    expect(stages[0]).toBe('ingest');
+    expect(stages[stages.length - 1]).toBe('orders');
+    expect(funnel.steps.find((s) => s.stage === 'orders')?.count).toBe(1);
+    expect(funnel.summary).toBe('1 order(s) placed.');
+  });
+
+  it('keeps history newest-first across multiple cycles', async () => {
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    await agent.runCycle();
+    await agent.runCycle();
+
+    const funnels = agent.getFunnels();
+    expect(funnels.map((f) => f.cycleId)).toEqual([2, 1]);
+  });
+});
+
 describe('dashboard API', () => {
+  it('exposes a diagnostic snapshot that never leaks a key', async () => {
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    const config = loadConfig({ ANTHROPIC_API_KEY: 'sk-ant-secret-value-12345' });
+    const server = createApiServer({ agent, config });
+
+    const response = await new Promise<{ status: number; body: string }>((resolve) => {
+      server.listen(0, '127.0.0.1', async () => {
+        const address = server.address() as { port: number };
+        const res = await fetch(`http://127.0.0.1:${address.port}/api/diagnostic`);
+        resolve({ status: res.status, body: await res.text() });
+        server.close();
+      });
+    });
+
+    expect(response.status).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.posture.summary.headline).toBeTypeOf('string');
+    expect(body.funnels).toEqual([]);
+    expect(response.body).not.toContain('sk-ant-secret-value-12345');
+  });
+
   it('serves HTML that shows the mode and never leaks a key', async () => {
     const { agent } = await agentWith([], llmReturning(bullishHypothesis));
     const config = loadConfig({ ANTHROPIC_API_KEY: 'sk-ant-secret-value-12345' });

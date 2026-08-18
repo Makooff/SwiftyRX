@@ -2,7 +2,7 @@
 import { loadConfig } from '../src/config/env.js';
 import { loadEnvFile } from '../src/config/load-env.js';
 import { buildIngestionStack, runIngestionCycle } from '../src/ingestion/pipeline.js';
-import { detectEvents, eventsWorthAnalysing } from '../src/intelligence/pipeline.js';
+import { detectEvents, evaluateAnalysisGate } from '../src/intelligence/pipeline.js';
 import { MemoryEventStore } from '../src/intelligence/event-store.js';
 
 /**
@@ -71,8 +71,12 @@ if (top.length > 0) {
   }
 }
 
-const worthAnalysing = eventsWorthAnalysing(events);
+const { kept: worthAnalysing, droppedByReason } = evaluateAnalysisGate(events);
 console.log(
   `\n${worthAnalysing.length} of ${events.length} events clear the materiality and confidence floors ` +
-    'and would be passed to Phase 3 analysis.\n',
+    'and would be passed to Phase 3 analysis.',
 );
+for (const [reason, count] of Object.entries(droppedByReason)) {
+  console.log(`  dropped: ${count} ${reason}`);
+}
+console.log('');
