@@ -185,6 +185,31 @@ const SUBMISSIONS = {
   },
 };
 
+/** A company that files `count` times, one per day, most recent first. */
+function chattyFiler(name: string, ticker: string, count: number) {
+  const index = (key: string, value: (i: number) => string) => ({
+    [key]: Array.from({ length: count }, (_, i) => value(i)),
+  });
+  const day = (i: number) => `2026-08-${String(20 - i).padStart(2, '0')}`;
+  return {
+    cik: '0000000000',
+    name,
+    tickers: [ticker],
+    filings: {
+      recent: {
+        ...index('accessionNumber', (i) => `0000000000-26-0000${String(i).padStart(2, '0')}`),
+        ...index('filingDate', day),
+        ...index('acceptanceDateTime', (i) => `${day(i)}T16:30:00.000Z`),
+        ...index('form', () => '4'),
+        ...index('primaryDocument', (i) => `doc-${i}.htm`),
+        ...index('primaryDocDescription', () => '4'),
+        ...index('reportDate', day),
+        ...index('items', () => ''),
+      },
+    },
+  };
+}
+
 function secAdapter(contactEmail: string | null = 'ops@example.com') {
   const clock = newClock();
   const fake = createFakeFetch([
@@ -246,6 +271,57 @@ describe('SecEdgarAdapter', () => {
     adapter.setTickers(['AAPL', 'ASML.AS']);
     const docs = await adapter.fetchDocuments();
     expect(docs).toHaveLength(2);
+  });
+
+  it('divides a limit between tickers instead of spending it on the first one', async () => {
+    // The failure this replaces: a global cap applied to the concatenated list
+    // was consumed entirely by the chatty tickers polled first, so the tail of
+    // the watchlist was never seen. A 40-symbol study silently became a
+    // 7-symbol one, and nothing in the output said so.
+    const clock = newClock();
+    const fake = createFakeFetch([
+      { match: 'company_tickers.json', body: COMPANY_TICKERS },
+      { match: '/submissions/CIK0000320193.json', body: chattyFiler('Apple Inc.', 'AAPL', 20) },
+      { match: '/submissions/CIK0001045810.json', body: chattyFiler('NVIDIA CORP', 'NVDA', 20) },
+    ]);
+    const adapter = new SecEdgarAdapter({
+      userAgent: 'ai-market-agent ops@example.com',
+      contactEmail: 'ops@example.com',
+      tickers: ['AAPL', 'NVDA'],
+      clock,
+      fetchImpl: fake.impl,
+    });
+
+    const docs = await adapter.fetchDocuments({ limit: 10 });
+    const bySymbol = new Map<string, number>();
+    for (const doc of docs) {
+      for (const ticker of doc.tickers) bySymbol.set(ticker, (bySymbol.get(ticker) ?? 0) + 1);
+    }
+
+    // Five each, not ten from whichever was polled first.
+    expect(bySymbol.get('AAPL')).toBe(5);
+    expect(bySymbol.get('NVDA')).toBe(5);
+  });
+
+  it('returns filings newest first across all tickers', async () => {
+    // So that a downstream consumer taking a head slice takes the most recent
+    // filings, not whichever company happened to be polled first.
+    const clock = newClock();
+    const fake = createFakeFetch([
+      { match: 'company_tickers.json', body: COMPANY_TICKERS },
+      { match: '/submissions/CIK0000320193.json', body: chattyFiler('Apple Inc.', 'AAPL', 4) },
+      { match: '/submissions/CIK0001045810.json', body: chattyFiler('NVIDIA CORP', 'NVDA', 4) },
+    ]);
+    const adapter = new SecEdgarAdapter({
+      userAgent: 'ai-market-agent ops@example.com',
+      contactEmail: 'ops@example.com',
+      tickers: ['AAPL', 'NVDA'],
+      clock,
+      fetchImpl: fake.impl,
+    });
+
+    const dates = (await adapter.fetchDocuments()).map((doc) => doc.published_at ?? '');
+    expect([...dates].sort((a, b) => b.localeCompare(a))).toEqual(dates);
   });
 });
 
