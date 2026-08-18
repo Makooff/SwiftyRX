@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# sc — bascule les briques lourdes de SuperClaude Lite.
+#
+#   sc status                     ce qui est actif
+#   sc mcp <nom> on|off           github vercel supabase stripe playwright context7 magic
+#   sc plugin <nom> on|off        vercel supabase stripe   (ajoute leurs skills : coûteux)
+#
+# Les MCP sont différés par ToolSearch : les allumer coûte ~0 tant que tu ne les
+# utilises pas. Les PLUGINS, eux, chargent leurs descriptions de skills en
+# permanence — vercel seul pèse ~3800 tokens. À n'allumer que le temps du projet.
+set -euo pipefail
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ $# -ge 1 ] || usage
+
+mcp_on() {
+  case "$1" in
+    github)     claude mcp add --transport http github     https://api.githubcopilot.com/mcp/ ;;
+    vercel)     claude mcp add --transport http vercel     https://mcp.vercel.com ;;
+    stripe)     claude mcp add --transport http stripe     https://mcp.stripe.com ;;
+    context7)   claude mcp add --transport http context7   https://mcp.context7.com/mcp ;;
+    supabase)   claude mcp add -s user supabase   -- npx -y @supabase/mcp-server-supabase@latest ;;
+    playwright) claude mcp add -s user playwright -- npx @playwright/mcp@latest ;;
+    magic)
+      key="${MAGIC_API_KEY:-}"
+      if [ -z "$key" ] && [ -t 0 ]; then printf 'Clé 21st.dev Magic (Entrée = ignorer) : '; read -r key || true; fi
+      if [ -n "$key" ]; then claude mcp add -s user magic -e "API_KEY=$key" -- npx -y @21st-dev/magic@latest
+      else claude mcp add -s user magic -- npx -y @21st-dev/magic@latest; fi ;;
+    *) echo "MCP inconnu : $1" >&2; exit 1 ;;
+  esac
+}
+
+case "$1" in
+  status)
+    echo "── MCP ──"; claude mcp list 2>/dev/null || echo "(claude mcp list indisponible)"
+    echo; echo "── Plugins ──"; claude plugin list 2>/dev/null || true
+    echo; echo "── Skills ──"; ls "$HOME/.claude/skills" 2>/dev/null | tr '\n' ' '; echo
+    ;;
+  mcp)
+    [ $# -eq 3 ] || usage
+    case "$3" in
+      on)  mcp_on "$2" >/dev/null 2>&1 && echo "✓ MCP $2 actif (différé — coûte ~0 avant usage)" ;;
+      off) claude mcp remove -s user "$2" >/dev/null 2>&1 && echo "✓ MCP $2 retiré" || echo "! $2 n'était pas actif" ;;
+      *) usage ;;
+    esac ;;
+  plugin)
+    [ $# -eq 3 ] || usage
+    case "$3" in
+      on)  claude plugin install "$2" >/dev/null 2>&1 && echo "✓ plugin $2 installé — ses skills sont désormais chargés à chaque session" ;;
+      off) claude plugin uninstall "$2" >/dev/null 2>&1 && echo "✓ plugin $2 retiré" || echo "! $2 n'était pas installé" ;;
+      *) usage ;;
+    esac ;;
+  *) usage ;;
+esac
