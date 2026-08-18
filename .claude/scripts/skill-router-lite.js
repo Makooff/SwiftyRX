@@ -9,9 +9,9 @@
 // Il ne propose que ce qui est réellement présent sur le disque, et reste
 // totalement silencieux quand rien ne matche (0 token).
 
-const fs = require('fs')
-const path = require('path')
-const os = require('os')
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
 
 const HOME = os.homedir()
 const PROJECT = process.env.CLAUDE_PROJECT_DIR || process.cwd()
@@ -75,7 +75,7 @@ function subdirs(p) {
 function installedMcp() {
   const s = new Set()
   for (const f of [path.join(HOME, '.claude.json'), path.join(PROJECT, '.mcp.json')]) {
-    try { Object.keys(JSON.parse(fs.readFileSync(f, 'utf8')).mcpServers || {}).forEach(k => s.add(k)) } catch {}
+    try { Object.keys(JSON.parse(fs.readFileSync(f, 'utf8')).mcpServers || {}).forEach(k => s.add(k)) } catch { /* ignore */ }
   }
   return s
 }
@@ -85,7 +85,7 @@ const chunks = []
 process.stdin.on('data', c => chunks.push(c))
 process.stdin.on('end', () => {
   let input = {}
-  try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch {}
+  try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { /* ignore */ }
   const msg = String(input.prompt || input.message || '').toLowerCase()
   if (!msg) return
 
@@ -107,6 +107,5 @@ process.stdin.on('end', () => {
   }
 
   if (!lines.length) return
-  console.log('⚡ Combiner:')
-  console.log(lines.join('\n'))
+  process.stdout.write(`⚡ Combiner:\n${lines.join('\n')}\n`)
 })
