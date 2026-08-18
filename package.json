@@ -24,6 +24,7 @@
     "backtest": "tsx scripts/backtest.ts",
     "dashboard": "tsx scripts/dashboard.ts",
     "study": "tsx scripts/event-study.ts",
+    "correlations": "tsx scripts/correlations.ts",
     "snapshot": "tsx scripts/snapshot.ts"
   },
   "dependencies": {

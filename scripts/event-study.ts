@@ -1,8 +1,15 @@
 #!/usr/bin/env tsx
+import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/config/env.js';
 import { loadEnvFile } from '../src/config/load-env.js';
 import { createLogger } from '../src/core/logger.js';
 import { multiplicitySummary, runEventStudy, type StudyEvent } from '../src/backtesting/event-study.js';
+import {
+  formatDuration,
+  parseSymbolsFile,
+  resolveUniverse,
+  secFetchFloorSeconds,
+} from '../src/backtesting/universe.js';
 import { roundTripCostPercent } from '../src/execution/costs.js';
 import { summariseEvidence, writeEvidenceFile } from '../src/strategy/evidence.js';
 import { buildIngestionStack } from '../src/ingestion/pipeline.js';
@@ -23,8 +30,14 @@ import type { Bar } from '../src/domain/types.js';
  *   npm run study                      watchlist, 2 years, vs SPY
  *   npm run study -- --years 5
  *   npm run study -- --symbols AAPL,MSFT
+ *   npm run study -- --symbols-file universe.txt   one per line, # comments
  *   npm run study -- --benchmark QQQ
  *   npm run study -- --years 5 --out   write the evidence book the agent reads
+ *
+ * On universe size: more symbols is the cheapest way to buy statistical power,
+ * because the sample and cluster bars a category must clear are counted over
+ * the whole universe. It is also the slowest part of the run — see the request
+ * floor printed before the filings are fetched.
  */
 
 loadEnvFile();
@@ -41,11 +54,35 @@ function arg(name: string, fallback?: string): string | undefined {
 
 const years = Number(arg('years', '2'));
 const benchmark = arg('benchmark', 'SPY')!;
-const symbols = (arg('symbols') ?? config.WATCHLIST.join(',')).split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+
+const symbolsFile = arg('symbols-file');
+let rawSymbols: string[];
+if (symbolsFile) {
+  try {
+    rawSymbols = parseSymbolsFile(readFileSync(symbolsFile, 'utf8'));
+  } catch (err) {
+    console.error(`Could not read --symbols-file ${symbolsFile}: ${(err as Error).message}`);
+    process.exit(1);
+  }
+} else {
+  rawSymbols = (arg('symbols') ?? config.WATCHLIST.join(',')).split(',');
+}
+
+// Deduplicated deliberately: this script calls the SEC adapter directly, so it
+// never passes through the ingestion deduplicator, and a repeated ticker would
+// contribute its filings twice — straight into the sample and cluster counts
+// the significance bars are checked against.
+const { symbols, duplicates } = resolveUniverse(rawSymbols);
 
 if (symbols.length === 0) {
-  console.error('No symbols. Set WATCHLIST or pass --symbols.');
+  console.error('No symbols. Set WATCHLIST, or pass --symbols or --symbols-file.');
   process.exit(1);
+}
+if (duplicates.length > 0) {
+  console.log(
+    `  ${duplicates.length} duplicate symbol(s) removed: ${duplicates.slice(0, 12).join(', ')}` +
+      `${duplicates.length > 12 ? ` (+${duplicates.length - 12})` : ''}`,
+  );
 }
 
 const since = new Date(Date.now() - years * 365 * 86_400_000);
@@ -72,7 +109,13 @@ if ('setTickers' in secSource && typeof secSource.setTickers === 'function') {
   (secSource as unknown as { setTickers: (t: string[]) => void }).setTickers(symbols);
 }
 
-console.log(`Fetching filings (up to ${PER_SYMBOL_FILINGS} per symbol)...`);
+// A three-hundred-symbol run should be a decision, not a surprise: the SEC
+// side alone is one request per symbol against a self-imposed 5/s.
+console.log(
+  `Fetching filings (up to ${PER_SYMBOL_FILINGS} per symbol) — ` +
+    `${symbols.length} SEC request(s), at least ${formatDuration(secFetchFloorSeconds(symbols.length))} ` +
+    'before the bars are even requested...',
+);
 const documents = await secSource.fetchDocuments({
   since,
   limit: symbols.length * PER_SYMBOL_FILINGS,
@@ -116,13 +159,20 @@ if (events.length === 0) {
 }
 
 // --- Bars --------------------------------------------------------------------
-console.log('Fetching daily bars...');
+console.log(`Fetching daily bars for ${symbols.length} symbol(s)...`);
 const barsBySymbol = new Map<string, Bar[]>();
+let priced = 0;
 for (const symbol of symbols) {
   try {
     barsBySymbol.set(symbol, (await stack.marketData.getBars(symbol, '1Day', { start: since })).bars);
   } catch (err) {
     log.warn({ symbol, error: (err as Error).message }, 'no bars for symbol');
+  }
+  priced += 1;
+  // Sequential by design, to respect the provider's limit. On a large universe
+  // that is minutes of silence otherwise, which is indistinguishable from a hang.
+  if (symbols.length > 20 && priced % 25 === 0) {
+    console.log(`  ${priced}/${symbols.length} requested, ${barsBySymbol.size} priced`);
   }
 }
 

@@ -93,6 +93,18 @@ const rawSchema = z.object({
    */
   EVIDENCE_FILE: z.string().default('data/evidence.json'),
 
+  // ---- Correlation --------------------------------------------------------
+  /**
+   * Where `npm run correlations` writes the groups estimated from historical
+   * returns, and where the agent reads them back.
+   *
+   * These labels are what makes MAX_CORRELATED_EXPOSURE_PERCENT apply at all:
+   * the Risk Engine skips the check for an order with no group. A missing file
+   * means the limit falls back to the curated sector map, and the snapshot says
+   * which of the two is in force.
+   */
+  CORRELATION_FILE: z.string().default('data/correlation-groups.json'),
+
   // ---- Infrastructure -----------------------------------------------------
   DATABASE_URL: z.string().optional(),
   REDIS_URL: z.string().optional(),

@@ -243,7 +243,10 @@ generated the signal is a look-ahead bug that produces beautiful, fictional equi
 - No database. State and the journal are files; they survive restarts but not concurrent
   writers, so two agents sharing a `data/` directory will corrupt each other's history.
 - No withdrawal, transfer, account-opening or bank-detail method anywhere, at any layer.
-- No open-world entity recognition, and no estimated correlation matrix — both are curated
-  lists, and their limits are stated rather than papered over.
+- No open-world entity recognition — the entity registry is a curated list, and its limits
+  are stated rather than papered over.
+- Correlation groups are estimated from returns, single-linkage over one past window, and
+  fall back to the curated sector map when no run exists. The snapshot reports which of the
+  two is in force and names any held position the limit cannot constrain.
 - No claim that any of this is profitable. Nothing here has been run against real market
   data or a real API.

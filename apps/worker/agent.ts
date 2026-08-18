@@ -39,7 +39,9 @@ import {
 import { ActivityLog, type ActivityEntry } from '../../src/monitoring/activity-log.js';
 import { CycleFunnelBuilder, CycleFunnelHistory, type CycleFunnel } from '../../src/monitoring/cycle-funnel.js';
 import { metrics } from '../../src/monitoring/metrics.js';
+import { entityForTicker } from '../../src/intelligence/entity_resolution/registry.js';
 import { RiskEngine } from '../../src/risk/engine.js';
+import { CorrelationGroups } from '../../src/risk/correlation.js';
 import { PositionManager } from '../../src/risk/position-manager.js';
 import type { RiskDecision } from '../../src/risk/types.js';
 import { EvidenceBook } from '../../src/strategy/evidence.js';
@@ -108,6 +110,11 @@ export interface AgentOptions {
    * missing file means the agent has no opinion and gates nothing on it.
    */
   evidence?: EvidenceBook;
+  /**
+   * Correlation groups. Loaded from CORRELATION_FILE when absent; without
+   * either, the correlated-exposure limit falls back to the curated sector map.
+   */
+  correlations?: CorrelationGroups;
 }
 
 export class TradingAgent {
@@ -130,6 +137,8 @@ export class TradingAgent {
   readonly positions: PositionManager;
   /** What the study measured, when a study has been run. */
   readonly evidence: EvidenceBook | undefined;
+  /** Estimated correlation groups, when they have been computed. */
+  readonly correlations: CorrelationGroups | undefined;
 
   private readonly recentSignals: Signal[] = [];
   private readonly recentEvents: MarketEvent[] = [];
@@ -171,6 +180,8 @@ export class TradingAgent {
     this.funnels = new CycleFunnelHistory();
     this.positions = new PositionManager({ clock: this.clock });
     this.evidence = options.evidence ?? EvidenceBook.load(options.config.EVIDENCE_FILE);
+    this.correlations =
+      options.correlations ?? CorrelationGroups.load(options.config.CORRELATION_FILE);
 
     this.discord =
       options.discord ??
@@ -203,14 +214,19 @@ export class TradingAgent {
     // report on itself.
     const restored = this.stateStore?.load(this.fingerprint);
 
+    // Resolved lazily through the agent, so a restored portfolio and a fresh
+    // one label their positions the same way.
+    const correlationGroupFor = (symbol: string) => this.correlationGroupFor(symbol);
+
     this.portfolio = restored
-      ? Portfolio.restore(restored.portfolio, { clock: this.clock })
+      ? Portfolio.restore(restored.portfolio, { clock: this.clock, correlationGroupFor })
       : new Portfolio({
           // Paper mode by construction: this is `initialCapital`, which resolves
           // to PAPER_CAPITAL_EUR outside live mode.
           initialCash: options.config.initialCapital,
           currency: options.config.BASE_CURRENCY,
           clock: this.clock,
+          correlationGroupFor,
         });
 
     this.broker = new PaperBroker({
@@ -803,6 +819,9 @@ export class TradingAgent {
       (signal.action === 'BUY' || signal.action === 'SELL') && symbol !== undefined && price !== undefined;
 
     if (tradeable && !this.state.halted) {
+      // Without a group the engine skips the correlated-exposure check
+      // entirely — the limit was configured, displayed, and inert.
+      const correlationGroup = this.correlationGroupFor(symbol);
       riskDecision = this.riskEngine.evaluate(
         {
           symbol,
@@ -811,6 +830,7 @@ export class TradingAgent {
           price: price!,
           priceAgeSeconds,
           ...(regime ? { volatilityPct: regime.volatilityPct } : {}),
+          ...(correlationGroup ? { correlationGroup } : {}),
           clientOrderId: sha256(`${signal.id}|${symbol}`).slice(0, 24),
         },
         this.portfolio.snapshot(),
@@ -916,6 +936,32 @@ export class TradingAgent {
   /** Notify that trading halted, once per transition rather than per cycle. */
   private async announceHalt(reasons: string[]): Promise<void> {
     await this.discord?.halted(reasons);
+  }
+
+  /**
+   * The correlated-exposure group for a symbol.
+   *
+   * Estimated groups first, then the curated sector map, then nothing. The
+   * order is deliberate: the estimate is measured and covers whatever universe
+   * it was run over, while the sector map is a dozen hand-written companies
+   * that happens to be all there is until a correlation run exists.
+   *
+   * Returning undefined means the Risk Engine skips the check for this order —
+   * which is what it silently did for every order before this existed.
+   */
+  correlationGroupFor(symbol: string): string | undefined {
+    return this.correlations?.groupFor(symbol) ?? entityForTicker(symbol)?.sector;
+  }
+
+  /**
+   * Which source is deciding groups, for the diagnostic to report.
+   *
+   * Never "none": the curated sector map always exists, so the question is
+   * only whether a measured estimate has superseded it. Whether any *given*
+   * symbol has a group is a separate question — see `correlationGroupFor`.
+   */
+  correlationSource(): 'estimated' | 'sector_map' {
+    return this.correlations ? 'estimated' : 'sector_map';
   }
 
   /** Age of the most recent successful cycle, in seconds. */

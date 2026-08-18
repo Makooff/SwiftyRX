@@ -124,7 +124,9 @@ docker compose up -d      # PostgreSQL + Redis
 | `npm run dev` | Continuous ingestion loop (no trading) |
 | `npm run paper` | Full paper-trading agent + dashboard, resuming saved state. `-- --once`, `-- --no-server`, `-- --fresh` |
 | `npm run backtest` | Historical backtest. `-- --symbol NVDA --years 5 --walk-forward --benner --fixture` |
-| `npm run study` | Does a class of filing carry any information at all? `-- --years 5 --benchmark SPY --out`. Needs no LLM |
+| `npm run study` | Does a class of filing carry any information at all? `-- --years 5 --benchmark SPY --out --symbols-file universe.txt`. Needs no LLM |
+| `npm run correlations` | Which of the names traded are the same bet? Writes the groups the correlated-exposure limit needs. `-- --days 500 --threshold 0.8 --out`. Needs no LLM |
+| `npm run snapshot` | One text file with everything needed to diagnose a running agent from outside it |
 | `npm run dashboard` | Dashboard only, against a fresh agent state |
 | `npm run doctor` | What works, what is degraded, what blocks trading — with the fix and the URL for each. Exits non-zero only when something blocks trading |
 | `npm run config:check` | Effective configuration and safety posture; never prints secrets |
@@ -529,7 +531,10 @@ are two separate reasons to wait, and neither is fixed by adding credentials.
   open-world entity recognition. Unlisted companies resolve to nothing.
 - Contradiction detection is keyword-based: it spots denial language, it cannot tell which
   claim is denied.
-- Correlation groups are a hand-maintained mapping, not an estimated correlation matrix.
+- Correlation groups are estimated from past returns by `npm run correlations`, over one
+  window. Correlations rise toward one in a sell-off — exactly when the limit matters — so
+  the groups are a floor on how concentrated the book is, not the whole of it. Without a
+  run, the fallback is a hand-maintained sector map covering a dozen companies.
 - No database. State is a JSON file and the journal an append-only JSONL file; both survive
   restarts, but neither supports concurrent writers. Two agents sharing a `data/` directory
   will corrupt each other's history.
