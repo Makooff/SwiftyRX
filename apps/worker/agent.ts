@@ -34,6 +34,7 @@ import { metrics } from '../../src/monitoring/metrics.js';
 import { RiskEngine } from '../../src/risk/engine.js';
 import { PositionManager } from '../../src/risk/position-manager.js';
 import type { RiskDecision } from '../../src/risk/types.js';
+import { EvidenceBook } from '../../src/strategy/evidence.js';
 import { detectRegime, type MarketRegime } from '../../src/strategy/regime.js';
 import { SignalGenerator } from '../../src/strategy/signals/generator.js';
 import type { Signal } from '../../src/strategy/signals/types.js';
@@ -88,6 +89,11 @@ export interface AgentOptions {
   /** Injected for tests; built from config otherwise. */
   discord?: DiscordNotifier;
   approver?: DiscordApprover;
+  /**
+   * What the event study measured. Loaded from EVIDENCE_FILE when absent; a
+   * missing file means the agent has no opinion and gates nothing on it.
+   */
+  evidence?: EvidenceBook;
 }
 
 export class TradingAgent {
@@ -106,6 +112,8 @@ export class TradingAgent {
   readonly activity: ActivityLog;
   /** Exit plans — the stops the sizing already assumed. */
   readonly positions: PositionManager;
+  /** What the study measured, when a study has been run. */
+  readonly evidence: EvidenceBook | undefined;
 
   private readonly recentSignals: Signal[] = [];
   private readonly recentEvents: MarketEvent[] = [];
@@ -141,6 +149,7 @@ export class TradingAgent {
     this.generator = new SignalGenerator(this.llm, this.log);
     this.activity = new ActivityLog({ clock: this.clock });
     this.positions = new PositionManager({ clock: this.clock });
+    this.evidence = options.evidence ?? EvidenceBook.load(options.config.EVIDENCE_FILE);
 
     this.discord =
       options.discord ??
@@ -473,12 +482,29 @@ export class TradingAgent {
       return;
     }
 
-    const candidates = eventsWorthAnalysing(events);
-    if (events.length > 0 && candidates.length === 0) {
+    const worthAnalysing = eventsWorthAnalysing(events);
+    if (events.length > 0 && worthAnalysing.length === 0) {
       // The most common reason nothing trades, and previously invisible: the
       // events were real but not worth spending an LLM call on.
       this.activity.info('gate', `${events.length} event(s), none cleared the analysis gate`);
     }
+
+    // The study's one veto. A category it measured drifting against a long is
+    // dropped here rather than analysed and then rejected downstream: paying
+    // for an LLM call to interpret an event we have measured as a losing entry
+    // is the most expensive way to reach the same "no".
+    const candidates = worthAnalysing.filter((candidate) => {
+      const blocked = this.evidence?.blocks(candidate.type);
+      if (!blocked) return true;
+      this.activity.record(
+        'warn',
+        'evidence',
+        `${candidate.type} skipped — ${blocked.category} measured ${blocked.horizon?.meanAbnormalPct}% abnormal ` +
+          `at +${blocked.horizon?.sessions}d over ${blocked.sampleSize} filings (t=${blocked.horizon?.tStat})`,
+      );
+      return false;
+    });
+
     if (candidates.length === 0) return;
 
     // --- Analyse, score, decide -------------------------------------------

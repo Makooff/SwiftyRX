@@ -15,6 +15,8 @@ import type { DocumentSource } from '../src/ingestion/types.js';
 import type { IngestionStack } from '../src/ingestion/pipeline.js';
 import type { NormalizedDocument } from '../src/domain/types.js';
 import type { LLMProvider } from '../src/intelligence/llm/types.js';
+import type { EventType } from '../src/intelligence/types.js';
+import { EvidenceBook } from '../src/strategy/evidence.js';
 
 /**
  * End-to-end tests for the trading agent.
@@ -109,17 +111,51 @@ const bullishHypothesis = {
   manipulation_suspected: false,
 };
 
-async function agentWith(documents: NormalizedDocument[], llm: LLMProvider, overrides: Record<string, string> = {}) {
+async function agentWith(
+  documents: NormalizedDocument[],
+  llm: LLMProvider,
+  overrides: Record<string, string> = {},
+  evidence?: EvidenceBook,
+) {
   const dir = await mkdtemp(join(tmpdir(), 'journal-'));
   const journalPath = join(dir, 'decisions.jsonl');
   const agent = new TradingAgent({
-    config: loadConfig({ WATCHLIST: 'AAPL', ...overrides }),
+    config: loadConfig({
+      WATCHLIST: 'AAPL',
+      // Hermetic: a study run on the developer's own machine writes a real
+      // evidence book, and these tests must not silently start reading it.
+      EVIDENCE_FILE: join(dir, 'no-evidence.json'),
+      ...overrides,
+    }),
     clock,
     stack: stackWith(documents),
     llm,
     journalPath,
+    ...(evidence ? { evidence } : {}),
   });
   return { agent, journalPath };
+}
+
+/** A book that refuses one event type and says nothing about anything else. */
+function bookBlocking(eventType: EventType, category: string): EvidenceBook {
+  return EvidenceBook.fromFile({
+    generatedAt: '2026-08-17T00:00:00Z',
+    windowYears: 5,
+    benchmark: 'SPY',
+    roundTripCostPct: 0.3,
+    symbols: 40,
+    categories: [
+      {
+        category,
+        eventType,
+        status: 'adverse',
+        sampleSize: 109,
+        clusters: 31,
+        horizon: { sessions: 20, meanAbnormalPct: -1.64, meanNetOfCostsPct: -1.94, tStat: -2.4 },
+        note: 'moves against a long',
+      },
+    ],
+  });
 }
 
 describe('TradingAgent — end to end', () => {
@@ -246,6 +282,98 @@ describe('TradingAgent — end to end', () => {
   it('starts with the paper capital, not the live target', async () => {
     const { agent } = await agentWith([], llmReturning(bullishHypothesis));
     expect(agent.portfolio.initialCash).toBe(10_000);
+  });
+});
+
+describe('the evidence gate', () => {
+  const earningsFiling = () => [
+    doc(
+      'sec_edgar',
+      'Apple Inc. filed 8-K — Results of Operations',
+      'Form 8-K filed by Apple Inc. Reported items: 2.02.',
+      { form: '8-K', items: ['2.02'] },
+      ['AAPL'],
+    ),
+    doc('outlet_a', 'Apple reports quarterly results above expectations', 'Earnings beat.', {}, ['AAPL']),
+  ];
+
+  it('trades the event when no study has been run', async () => {
+    // The baseline the gate is measured against: without a book, nothing
+    // changes.
+    const { agent } = await agentWith(earningsFiling(), llmReturning(bullishHypothesis));
+    await agent.runCycle();
+    expect(agent.getState().ordersPlaced).toBe(1);
+  });
+
+  it('refuses the same event once the study measured it drifting against a long', async () => {
+    const { agent } = await agentWith(
+      earningsFiling(),
+      llmReturning(bullishHypothesis),
+      {},
+      bookBlocking('earnings', '8-K item 2.02'),
+    );
+    await agent.runCycle();
+
+    expect(agent.getState().ordersPlaced).toBe(0);
+    expect(agent.portfolio.openPositions).toHaveLength(0);
+  });
+
+  it('spends no LLM call on a blocked event', async () => {
+    // The gate sits before analysis on purpose: paying a model to interpret an
+    // entry already measured as losing is the most expensive route to the same
+    // answer.
+    let calls = 0;
+    const counting: LLMProvider = {
+      id: 'counting',
+      model: 'counting',
+      isConfigured: () => true,
+      analyze: async <T,>() => {
+        calls += 1;
+        return {
+          value: bullishHypothesis as T,
+          usage: { inputTokens: 1, outputTokens: 1 },
+          model: 'counting',
+          latencyMs: 1,
+        };
+      },
+      health: async () => ({ state: 'healthy' as const }),
+    };
+
+    const { agent } = await agentWith(
+      earningsFiling(),
+      counting,
+      {},
+      bookBlocking('earnings', '8-K item 2.02'),
+    );
+    await agent.runCycle();
+    expect(calls).toBe(0);
+  });
+
+  it('says on the activity feed why it stood down', async () => {
+    // A silent refusal is indistinguishable from a broken pipeline, which is
+    // exactly the confusion this agent has already caused once.
+    const { agent } = await agentWith(
+      earningsFiling(),
+      llmReturning(bullishHypothesis),
+      {},
+      bookBlocking('earnings', '8-K item 2.02'),
+    );
+    await agent.runCycle();
+
+    const feed = agent.activity.recent().map((entry) => entry.message).join(' | ');
+    expect(feed).toMatch(/8-K item 2.02/);
+    expect(feed).toMatch(/-1.64/);
+  });
+
+  it('leaves an unrelated event type alone', async () => {
+    const { agent } = await agentWith(
+      earningsFiling(),
+      llmReturning(bullishHypothesis),
+      {},
+      bookBlocking('bankruptcy', '8-K item 1.03'),
+    );
+    await agent.runCycle();
+    expect(agent.getState().ordersPlaced).toBe(1);
   });
 });
 

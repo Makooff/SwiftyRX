@@ -90,6 +90,7 @@ function buildDashboardData(agent: TradingAgent, config: AppConfig): DashboardDa
       takeProfitPrice: plan.takeProfitPrice,
       expiresAt: plan.expiresAt,
     })),
+    ...(agent.evidence ? { evidence: agent.evidence.file } : {}),
     llmProvider: agent.getLlmProviderId(),
   };
 }
@@ -147,6 +148,10 @@ export function createApiServer(options: ApiServerOptions): Server {
           return json(200, settingsRows(config));
         case '/api/exits':
           return json(200, agent.positions.serialize());
+        case '/api/evidence':
+          // No study run is not an error — it is the honest state of having
+          // measured nothing yet.
+          return json(200, agent.evidence?.file ?? { categories: [] });
         case '/api/activity':
           return json(200, agent.getActivity(200));
         case '/api/metrics':

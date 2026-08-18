@@ -36,7 +36,13 @@ function emptyStack(): IngestionStack {
 }
 
 function agentFor(env: Record<string, string> = {}) {
-  const config = loadConfig({ WATCHLIST: 'AAPL', ...env });
+  // Hermetic: a study run on the developer's own machine writes a real
+  // evidence book, and these tests must not start reading it.
+  const config = loadConfig({
+    WATCHLIST: 'AAPL',
+    EVIDENCE_FILE: '/nonexistent/evidence.json',
+    ...env,
+  });
   const agent = new TradingAgent({ config, clock, stack: emptyStack() });
   return { agent, config };
 }
@@ -186,6 +192,13 @@ describe('settings panel', () => {
     for (const label of ['Daily loss limit', 'Risk per trade', 'Quote staleness', 'Max position']) {
       expect(response.body, `${label} missing`).toContain(label);
     }
+  });
+
+  it('says plainly when no study has been run rather than showing an empty table', async () => {
+    // An empty evidence panel and a panel saying "nothing is blocked" mean very
+    // different things, and the second one is the truth.
+    const response = await request({}, {}, '/');
+    expect(response.body).toContain('No study has been run');
   });
 
   it('exposes no endpoint that could change a setting', async () => {

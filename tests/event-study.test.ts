@@ -83,12 +83,15 @@ describe('event study', () => {
   });
 
   it('says "no abnormal drift" when a large sample shows nothing', () => {
-    // 40 events on a flat series: plenty of observations, no effect.
+    // 40 events across 10 symbols on flat series: plenty of observations,
+    // plenty of clusters, no effect.
     const flat = Array.from({ length: 60 }, () => 100);
-    const events = Array.from({ length: 40 }, (_, i) => event('AAPL', i + 1));
+    const symbols = Array.from({ length: 10 }, (_, i) => `SYM${i}`);
     const result = runEventStudy({
-      events,
-      barsBySymbol: new Map([['AAPL', bars('AAPL', flat)]]),
+      events: symbols.flatMap((symbol) =>
+        Array.from({ length: 4 }, (_, i) => event(symbol, i + 1)),
+      ),
+      barsBySymbol: new Map(symbols.map((symbol) => [symbol, bars(symbol, flat)])),
       horizons: [1],
     });
     expect(result[0]!.sampleSize).toBeGreaterThanOrEqual(30);
@@ -126,7 +129,93 @@ describe('event study', () => {
     expect(result).toHaveLength(0);
   });
 
-  it('computes a t-statistic that grows with sample size, not with the mean alone', () => {
+  it('refuses a finding built from too few distinct symbols', () => {
+    // 60 filings from two companies is not 60 independent observations. Before
+    // clustering, this was the exact shape that produced the largest
+    // "significant" results in the real run.
+    const drifting = Array.from({ length: 90 }, (_, i) => Number((100 * 1.004 ** i).toFixed(4)));
+    const events = ['AAPL', 'MSFT'].flatMap((symbol) =>
+      Array.from({ length: 30 }, (_, i) => event(symbol, i + 1)),
+    );
+    const result = runEventStudy({
+      events,
+      barsBySymbol: new Map([
+        ['AAPL', bars('AAPL', drifting)],
+        ['MSFT', bars('MSFT', drifting)],
+      ]),
+      horizons: [5],
+    });
+
+    expect(result[0]!.sampleSize).toBeGreaterThanOrEqual(30);
+    expect(result[0]!.verdict).toMatch(/only 2 distinct symbol/);
+  });
+
+  it('reports the naive t-statistic too, and it is the inflated one', () => {
+    // The shape this correction exists for: a handful of symbols on strong
+    // multi-year drifts, each filing dozens of times. Every filing of one
+    // company inherits that company's drift, so the 240 observations carry far
+    // less information than 240 independent ones — but the naive statistic
+    // counts them all. The naive number is kept visible because it is what the
+    // previous version of this study reported.
+    const symbols = Array.from({ length: 12 }, (_, i) => `SYM${i}`);
+    const barsBySymbol = new Map(
+      symbols.map((symbol, s) => {
+        // Per-symbol drift, plus an aperiodic wobble so returns genuinely vary.
+        const drift = 1 + s * 0.0008;
+        const closes = Array.from({ length: 90 }, (_, i) =>
+          Number((100 * drift ** i * (1 + 0.01 * Math.sin(i * 1.7))).toFixed(4)),
+        );
+        return [symbol, bars(symbol, closes)] as const;
+      }),
+    );
+
+    const result = runEventStudy({
+      events: symbols.flatMap((symbol) =>
+        Array.from({ length: 20 }, (_, i) => event(symbol, i + 1)),
+      ),
+      barsBySymbol: new Map(barsBySymbol),
+      horizons: [5],
+    });
+
+    const horizon = result[0]!.horizons[0]!;
+    expect(horizon.clusters).toBe(12);
+    expect(horizon.sampleSize).toBe(240);
+    expect(Math.abs(horizon.naiveTStat)).toBeGreaterThan(Math.abs(horizon.tStat));
+  });
+
+  it('counts how concentrated a sample is in its busiest symbol', () => {
+    const flat = Array.from({ length: 60 }, () => 100);
+    const symbols = ['HEAVY', 'LIGHT'];
+    const result = runEventStudy({
+      events: [
+        ...Array.from({ length: 30 }, (_, i) => event('HEAVY', i + 1)),
+        ...Array.from({ length: 10 }, (_, i) => event('LIGHT', i + 1)),
+      ],
+      barsBySymbol: new Map(symbols.map((symbol) => [symbol, bars(symbol, flat)])),
+      horizons: [1],
+    });
+    expect(result[0]!.horizons[0]!.largestClusterShare).toBeCloseTo(0.75, 2);
+  });
+
+  it('will not call an effect tradeable when it is smaller than the round trip', () => {
+    // The distinction the whole project rests on: statistically real and worth
+    // trading are different claims.
+    const symbols = Array.from({ length: 15 }, (_, i) => `SYM${i}`);
+    // +0.1% over the window, on a 0.3% round trip.
+    const tiny = [100, 100, 100.1];
+    const result = runEventStudy({
+      events: symbols.map((symbol) => event(symbol, 1)),
+      barsBySymbol: new Map(symbols.map((symbol) => [symbol, bars(symbol, tiny)])),
+      horizons: [2],
+      roundTripCostPct: 0.3,
+    });
+
+    const horizon = result[0]!.horizons[0]!;
+    expect(horizon.meanAbnormalPct).toBeCloseTo(0.1, 3);
+    expect(horizon.meanNetOfCostsPct).toBeCloseTo(-0.2, 3);
+  });
+
+  it('computes a naive t-statistic that grows with sample size, not with the mean alone', () => {
     // Same effect, more observations → more confidence. This is the number that
     // separates a result from an anecdote.
     //
@@ -152,8 +241,10 @@ describe('event study', () => {
     });
 
     expect(few[0]!.horizons[0]!.stdDevPct).toBeGreaterThan(0);
-    expect(Math.abs(many[0]!.horizons[0]!.tStat)).toBeGreaterThan(
-      Math.abs(few[0]!.horizons[0]!.tStat),
+    expect(Math.abs(many[0]!.horizons[0]!.naiveTStat)).toBeGreaterThan(
+      Math.abs(few[0]!.horizons[0]!.naiveTStat),
     );
+    // All from one symbol, so the clustered statistic declines to say anything.
+    expect(many[0]!.horizons[0]!.tStat).toBe(0);
   });
 });

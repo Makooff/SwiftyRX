@@ -124,6 +124,7 @@ docker compose up -d      # PostgreSQL + Redis
 | `npm run dev` | Continuous ingestion loop (no trading) |
 | `npm run paper` | Full paper-trading agent + dashboard, resuming saved state. `-- --once`, `-- --no-server`, `-- --fresh` |
 | `npm run backtest` | Historical backtest. `-- --symbol NVDA --years 5 --walk-forward --benner --fixture` |
+| `npm run study` | Does a class of filing carry any information at all? `-- --years 5 --benchmark SPY --out`. Needs no LLM |
 | `npm run dashboard` | Dashboard only, against a fresh agent state |
 | `npm run doctor` | What works, what is degraded, what blocks trading — with the fix and the URL for each. Exits non-zero only when something blocks trading |
 | `npm run config:check` | Effective configuration and safety posture; never prints secrets |
@@ -260,6 +261,42 @@ An experimental Benner-cycle overlay exists in `src/strategy/signals/benner.ts` 
 **off unless explicitly enabled**. It is treated as a hypothesis to be tested, never as
 truth — `npm run backtest -- --benner` runs the same strategy with and without it so you can
 see the difference rather than assume one.
+
+## Evidence
+
+The backtester measures a *strategy*, and its only strategies are a moving-average crossover
+and buy & hold — neither of which is what this project built. So nothing had ever measured
+the premise underneath the whole thing: **is an SEC filing of a given type followed by an
+abnormal move at all?**
+
+```bash
+npm run study -- --years 5 --benchmark SPY --out
+```
+
+Entry at the open of the session *after* the filing. Returns to +1, +5 and +20 sessions,
+with the benchmark's move over the identical window subtracted. Two things it does that the
+usual version of this does not:
+
+- **Standard errors clustered by symbol.** 2,700 Form 4 filings across 40 tickers are not
+  2,700 independent observations — one company's filings share that company's history, and
+  at +20d their windows physically overlap. The naive t-statistic treats them as independent
+  and is inflated, often threefold. Both are printed; only the clustered one can support a
+  verdict, and a category carried by fewer than 10 distinct symbols gets none at all.
+- **Net of costs.** A mean of +0.29% is not an edge when the round trip costs 0.30%. Every
+  mean is shown alongside what survives the cost model for the position size this account
+  would actually trade.
+
+`--out` writes the result to `data/evidence.json`, which the agent reads at startup. What it
+does with it is deliberately one-sided:
+
+- A category measured drifting **against** a long — real sample, real spread of symbols —
+  is **refused**, before the LLM call rather than after it. There is no argument for buying
+  into a measured adverse drift.
+- A category measured drifting **for** a long licenses nothing. It is one sample of one
+  regime, tested alongside a dozen other categories, where one crossing |t|=1.96 by chance
+  is expected. Support is recorded and displayed; it never lowers a gate.
+
+No file means no opinion, and the agent behaves exactly as it did before one existed.
 
 ## Risk engine
 
