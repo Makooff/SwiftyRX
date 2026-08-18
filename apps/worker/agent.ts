@@ -11,7 +11,9 @@ import {
 import {
   buildOutcome,
   DecisionJournal,
+  hitRatesFrom,
   outcomeDueAt,
+  pendingFrom,
   type JournalEntry,
 } from '../../src/database/decision-journal.js';
 import { PaperBroker } from '../../src/execution/paper/paper-broker.js';
@@ -134,6 +136,10 @@ export class TradingAgent {
   private readonly recentOrders: Order[] = [];
   private lastHealth: HealthReport[] = [];
   private regimeBySymbol = new Map<string, MarketRegime>();
+  /** Measured hit rate per event type, refreshed once per cycle. */
+  private hitRates: Record<string, { hitRate: number; sampleSize: number }> = {};
+  /** Decisions whose horizon has passed but whose price is not published yet. */
+  private pendingOutcomeCount = 0;
 
   private readonly discord: DiscordNotifier | undefined;
   private readonly approver: DiscordApprover | undefined;
@@ -327,6 +333,14 @@ export class TradingAgent {
     return [...this.lastHealth];
   }
 
+  /**
+   * What the decisions actually did, per event type — empty until enough
+   * horizons have elapsed for anything to be scored.
+   */
+  getHitRates(): { rates: Record<string, { hitRate: number; sampleSize: number }>; pending: number } {
+    return { rates: { ...this.hitRates }, pending: this.pendingOutcomeCount };
+  }
+
   getLlmProviderId(): string {
     return this.llm.id;
   }
@@ -449,16 +463,17 @@ export class TradingAgent {
    * outcome.
    */
   private async evaluateOutcomes(): Promise<void> {
-    let due: JournalEntry[];
+    let entries: JournalEntry[];
     try {
-      due = await this.journal.pendingOutcomes(this.clock.now());
+      entries = await this.journal.readAll();
     } catch (err) {
       this.recordError('outcome', `could not read the journal: ${(err as Error).message}`);
       return;
     }
-    if (due.length === 0) return;
 
+    const due = pendingFrom(entries, this.clock.now());
     let evaluated = 0;
+
     for (const entry of due.slice(0, OUTCOMES_PER_CYCLE)) {
       try {
         const priceAfter = await this.priceAtOrAfter(entry.asset, outcomeDueAt(entry));
@@ -468,6 +483,9 @@ export class TradingAgent {
 
         const outcome = buildOutcome(entry, priceAfter, this.clock.now().toISOString());
         await this.journal.recordOutcome(entry.signalId!, outcome);
+        // Keep the copy in hand current, so the rates computed below include
+        // what this pass just learned.
+        entry.outcome = outcome;
         evaluated += 1;
         this.activity.record(
           outcome.directionCorrect ? 'good' : 'warn',
@@ -488,6 +506,11 @@ export class TradingAgent {
     if (evaluated > 0 && due.length > evaluated) {
       this.activity.info('outcome', `${due.length - evaluated} decision(s) still awaiting a price`);
     }
+
+    // Cached from the read already done, so the dashboard and the diagnostic
+    // can report the real hit rate without touching the disk per request.
+    this.hitRates = hitRatesFrom(entries);
+    this.pendingOutcomeCount = due.length - evaluated;
   }
 
   /**
@@ -737,8 +760,10 @@ export class TradingAgent {
       }
     }
 
-    const hitRates = await this.journal.hitRateByEventType();
-    const historical = hitRates[event.type];
+    // From the cache refreshed at the top of this cycle rather than a fresh
+    // read per event: the journal is read once, and every event in the cycle
+    // is shown the same numbers.
+    const historical = this.hitRates[event.type];
 
     const { signal, skipped } = await this.generator.generate({
       event,

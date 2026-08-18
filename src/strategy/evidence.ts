@@ -90,6 +90,31 @@ export function eventTypeForCategory(category: string): EventType | undefined {
 }
 
 /**
+ * Event types a study could ever have an opinion about.
+ *
+ * `eventTypeForCategory` reads only the two SEC tables, so an event type that
+ * appears in neither can never be attached to a measured category — and
+ * therefore can never be blocked, however badly it performs. That includes
+ * everything the keyword rules produce from press releases and feeds:
+ * monetary_policy, macro_release, trade_policy, sanctions, legal_action,
+ * guidance, product.
+ *
+ * Derived from the same tables rather than listed by hand, so it cannot fall
+ * out of step with what the mapping actually does. It exists to make the gap
+ * visible: silently trading types the evidence gate structurally cannot reach
+ * is the failure this reports.
+ */
+export const MEASURABLE_EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
+  ...Object.values(SEC_ITEM_RULES).map((rule) => rule.type),
+  ...Object.values(SEC_FORM_RULES).map((rule) => rule.type),
+]);
+
+/** Could any study result ever gate this event type? */
+export function isMeasurable(type: EventType): boolean {
+  return MEASURABLE_EVENT_TYPES.has(type);
+}
+
+/**
  * The sample a test needs before it means anything at all, in either direction.
  *
  * Restated here rather than inferred from `survivesMultiplicity` so the book's

@@ -54,6 +54,13 @@ export interface DashboardData {
   settings: Array<{ label: string; value: string; note?: string }>;
   /** Stop, target and deadline for each open position. */
   exitPlans: Array<{ symbol: string; stopPrice: number; takeProfitPrice: number; expiresAt: string }>;
+  /** What past decisions actually did, once their horizons elapsed. */
+  outcomes: {
+    rates: Record<string, { hitRate: number; sampleSize: number }>;
+    pending: number;
+  };
+  /** Recent event types no study result could ever gate. */
+  unmeasurableEventTypes: Array<{ type: string; recentEvents: number }>;
   /** What the event study measured, when one has been run. */
   evidence?: {
     generatedAt: string;
@@ -348,6 +355,23 @@ export function renderDashboard(data: DashboardData): string {
     }`
     : '<div class="empty">No cycle has run yet.</div>';
 
+  const outcomeEntries = Object.entries(data.outcomes.rates).sort(
+    (a, b) => b[1].sampleSize - a[1].sampleSize,
+  );
+  const outcomeRows =
+    outcomeEntries.length > 0
+      ? outcomeEntries
+          .map(
+            ([type, { hitRate, sampleSize }]) => `<tr>
+        <td>${escapeHtml(type)}</td>
+        <td class="mono">${(hitRate * 100).toFixed(1)}%</td>
+        <td class="muted mono">${sampleSize}</td>
+        <td class="muted">${sampleSize < 30 ? 'too few to read' : ''}</td>
+      </tr>`,
+          )
+          .join('')
+      : '<tr><td colspan="4" class="empty">Nothing scored yet — no decision has passed its horizon with a published price.</td></tr>';
+
   const healthRows =
     data.health.length > 0
       ? data.health
@@ -440,6 +464,32 @@ export function renderDashboard(data: DashboardData): string {
       Checked once per cycle against our own marks — these are not resting orders at the
       broker, so a gap can fill worse than the stop.
     </p>
+  </section>
+
+  <section>
+    <h2>Decision outcomes</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Event type</th><th>Direction right</th><th>n</th><th></th></tr></thead>
+      <tbody>${outcomeRows}</tbody>
+    </table></div>
+    <p class="muted" style="margin:10px 0 0;font-size:12px">
+      Scored once the signal's own horizon has elapsed, against the first session at or after it.
+      ${data.outcomes.pending > 0 ? `${data.outcomes.pending} decision(s) due but not yet priced. ` : ''}
+      HOLD and WATCH are not scored: they predict no direction. This is the number handed to the
+      model before each new signal — below n=30 the scorer refuses to use it.
+    </p>
+    ${
+      data.unmeasurableEventTypes.length > 0
+        ? `<p class="muted" style="margin:10px 0 0;font-size:12px">
+      <span class="warn">No study can measure</span>
+      ${data.unmeasurableEventTypes
+        .map((e) => `${escapeHtml(e.type)} (${e.recentEvents})`)
+        .join(', ')}
+      — no filing category maps onto these, so the evidence gate could never block them
+      however they perform.
+    </p>`
+        : ''
+    }
   </section>
 
   <section>

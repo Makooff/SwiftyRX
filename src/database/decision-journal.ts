@@ -162,6 +162,42 @@ export function buildOutcome(
   };
 }
 
+/** Decisions ready to be priced: horizon elapsed, outcome still unknown. */
+export function pendingFrom(entries: JournalEntry[], now: Date): JournalEntry[] {
+  return entries.filter(
+    (entry) => isEvaluable(entry) && outcomeDueAt(entry).getTime() <= now.getTime(),
+  );
+}
+
+/**
+ * Hit rate per event type, over entries whose outcome is known.
+ *
+ * A pure function over entries already in hand, so a caller that has just read
+ * the journal for another reason does not read it again.
+ *
+ * Returns the sample size alongside every rate, because a hit rate without an n
+ * is not a statistic — and the scorer refuses to use one below n=30.
+ */
+export function hitRatesFrom(
+  entries: JournalEntry[],
+): Record<string, { hitRate: number; sampleSize: number }> {
+  const buckets: Record<string, { wins: number; total: number }> = {};
+
+  for (const entry of entries) {
+    if (!entry.outcome) continue;
+    const bucket = (buckets[entry.eventType] ??= { wins: 0, total: 0 });
+    bucket.total += 1;
+    if (entry.outcome.directionCorrect) bucket.wins += 1;
+  }
+
+  return Object.fromEntries(
+    Object.entries(buckets).map(([type, { wins, total }]) => [
+      type,
+      { hitRate: total > 0 ? wins / total : 0, sampleSize: total },
+    ]),
+  );
+}
+
 export interface JournalOptions {
   path?: string;
   clock?: Clock;
@@ -306,34 +342,11 @@ export class DecisionJournal {
    * call.
    */
   async pendingOutcomes(now: Date): Promise<JournalEntry[]> {
-    const entries = await this.readAll();
-    return entries.filter(
-      (entry) => isEvaluable(entry) && outcomeDueAt(entry).getTime() <= now.getTime(),
-    );
+    return pendingFrom(await this.readAll(), now);
   }
 
-  /**
-   * Hit rate per event type, from entries whose outcome is known.
-   *
-   * Returns the sample size alongside every rate, because a hit rate without
-   * an n is not a statistic — and the scorer refuses to use one below n=30.
-   */
+  /** Hit rate per event type, from entries whose outcome is known. */
   async hitRateByEventType(): Promise<Record<string, { hitRate: number; sampleSize: number }>> {
-    const entries = await this.readAll();
-    const buckets: Record<string, { wins: number; total: number }> = {};
-
-    for (const entry of entries) {
-      if (!entry.outcome) continue;
-      const bucket = (buckets[entry.eventType] ??= { wins: 0, total: 0 });
-      bucket.total += 1;
-      if (entry.outcome.directionCorrect) bucket.wins += 1;
-    }
-
-    return Object.fromEntries(
-      Object.entries(buckets).map(([type, { wins, total }]) => [
-        type,
-        { hitRate: total > 0 ? wins / total : 0, sampleSize: total },
-      ]),
-    );
+    return hitRatesFrom(await this.readAll());
   }
 }
