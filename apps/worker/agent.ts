@@ -8,7 +8,12 @@ import {
   fingerprintOf,
   type StateFingerprint,
 } from '../../src/database/agent-state-store.js';
-import { DecisionJournal } from '../../src/database/decision-journal.js';
+import {
+  buildOutcome,
+  DecisionJournal,
+  outcomeDueAt,
+  type JournalEntry,
+} from '../../src/database/decision-journal.js';
 import { PaperBroker } from '../../src/execution/paper/paper-broker.js';
 import { Portfolio } from '../../src/execution/paper/portfolio.js';
 import type { Order } from '../../src/execution/broker/types.js';
@@ -54,6 +59,12 @@ import type { Signal } from '../../src/strategy/signals/types.js';
  * The agent never constructs a live broker. It holds a PaperBroker, and the
  * type it holds has no method that could move real money.
  */
+
+/**
+ * How many pending decisions to price per cycle. Each costs a historical-bars
+ * call, and a backlog that clears one cycle later is no worse an answer.
+ */
+const OUTCOMES_PER_CYCLE = 20;
 
 export interface AgentState {
   startedAt: string;
@@ -409,6 +420,77 @@ export class TradingAgent {
   }
 
   /**
+   * The price at the first session at or after a date, or undefined when that
+   * session has not happened yet.
+   *
+   * A horizon that lands on a weekend or a holiday resolves to the next
+   * trading day, which is why this asks for a window rather than a day.
+   */
+  private async priceAtOrAfter(symbol: string, at: Date): Promise<number | undefined> {
+    const { bars } = await this.stack.marketData.getBars(symbol, '1Day', {
+      start: at,
+      // A week covers a weekend plus a holiday; beyond that the horizon is not
+      // "just after" any more.
+      end: new Date(at.getTime() + 7 * 86_400_000),
+    });
+    const bar = bars.find((candidate) => Date.parse(candidate.timestamp) >= at.getTime());
+    return bar?.close;
+  }
+
+  /**
+   * Fill in what actually happened to decisions whose horizon has run out.
+   *
+   * Without this the journal records what the system decided and never whether
+   * it was right, which leaves `hitRateByEventType()` — fed to the model on
+   * every subsequent signal — quoting a hit rate computed from nothing.
+   *
+   * Capped per cycle because each evaluation costs a historical-bars call. The
+   * backlog is not urgent: an outcome that lands one cycle later is the same
+   * outcome.
+   */
+  private async evaluateOutcomes(): Promise<void> {
+    let due: JournalEntry[];
+    try {
+      due = await this.journal.pendingOutcomes(this.clock.now());
+    } catch (err) {
+      this.recordError('outcome', `could not read the journal: ${(err as Error).message}`);
+      return;
+    }
+    if (due.length === 0) return;
+
+    let evaluated = 0;
+    for (const entry of due.slice(0, OUTCOMES_PER_CYCLE)) {
+      try {
+        const priceAfter = await this.priceAtOrAfter(entry.asset, outcomeDueAt(entry));
+        // No bar covering the horizon yet — the session has not closed, or the
+        // provider has not published it. Not an error; try again next cycle.
+        if (priceAfter === undefined) continue;
+
+        const outcome = buildOutcome(entry, priceAfter, this.clock.now().toISOString());
+        await this.journal.recordOutcome(entry.signalId!, outcome);
+        evaluated += 1;
+        this.activity.record(
+          outcome.directionCorrect ? 'good' : 'warn',
+          'outcome',
+          `${entry.signal} ${entry.asset} after ${outcome.horizonDays}d: ${outcome.returnPct.toFixed(2)}% — ` +
+            `${outcome.directionCorrect ? 'right' : 'wrong'}`,
+        );
+      } catch (err) {
+        // A price we cannot fetch is a measurement we do not have, not a
+        // failed cycle. It stays pending.
+        this.log.debug(
+          { asset: entry.asset, error: (err as Error).message },
+          'could not evaluate outcome yet',
+        );
+      }
+    }
+
+    if (evaluated > 0 && due.length > evaluated) {
+      this.activity.info('outcome', `${due.length - evaluated} decision(s) still awaiting a price`);
+    }
+  }
+
+  /**
    * One complete pass through the pipeline, checkpointed however it ends.
    *
    * The cycle has several early exits — no documents, no events, an ingestion
@@ -448,6 +530,11 @@ export class TradingAgent {
     // Before anything else, and regardless of halts: a halt stops new risk
     // being taken, never the closing of risk already on the books.
     await this.processExits(marks);
+
+    // Scoring past decisions is independent of whether this cycle finds
+    // anything, and a halt is no reason to stop learning what the last ones
+    // were worth.
+    await this.evaluateOutcomes();
 
     // Halting conditions are checked before any work: if trading is halted,
     // there is no point paying for LLM analysis this cycle.
