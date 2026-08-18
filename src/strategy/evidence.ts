@@ -15,12 +15,11 @@ import type { EventType } from '../intelligence/types.js';
  *
  *  - Evidence that a category drifts **against** a long, over a real sample and
  *    a real spread of symbols, **blocks** it. There is no argument for buying
- *    into a measured adverse drift, and the first real run found exactly that
- *    for 8-K item 2.02 — the earnings filings this agent was built to trade.
+ *    into a measured adverse drift.
  *  - Evidence that a category drifts **for** a long does **not** license
- *    anything. It is one sample of one regime, tested alongside a dozen other
- *    categories, and a passing t-statistic among twelve tests is expected by
- *    chance. Support is recorded and shown; it never lowers a gate.
+ *    anything. Even after false-discovery-rate control across the whole run,
+ *    it is one sample of one market regime. Support is recorded and shown; it
+ *    never lowers a gate.
  *
  * That asymmetry is the honest reading of a single backtest, and it is what
  * keeps this from becoming a machine for finding reasons to trade.
@@ -70,7 +69,6 @@ export interface EvidenceFile {
   categories: CategoryEvidence[];
 }
 
-const T_THRESHOLD = 1.96;
 const MIN_SAMPLE = 30;
 const MIN_CLUSTERS = 10;
 
@@ -87,11 +85,19 @@ export function eventTypeForCategory(category: string): EventType | undefined {
   return SEC_FORM_RULES[category.trim()]?.type;
 }
 
+/**
+ * A test the book is willing to act on.
+ *
+ * `survivesMultiplicity` already carries the sample and cluster bars — it is
+ * only ever set on tests that cleared them — but they are restated here so the
+ * book's own standard is legible without reading the study, and so an older or
+ * hand-written file cannot slip through on the flag alone.
+ */
 function significant(horizon: HorizonResult): boolean {
   return (
     horizon.sampleSize >= MIN_SAMPLE &&
     horizon.clusters >= MIN_CLUSTERS &&
-    Math.abs(horizon.tStat) >= T_THRESHOLD
+    horizon.survivesMultiplicity
   );
 }
 

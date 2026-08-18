@@ -1,4 +1,5 @@
 import type { Bar } from '../domain/types.js';
+import { benjaminiHochberg, studentTTwoSidedP } from './stats.js';
 
 /**
  * Event study: does a class of event carry any information at all?
@@ -31,14 +32,19 @@ import type { Bar } from '../domain/types.js';
  *    reported; only the clustered one is allowed to support a verdict.
  *  - **Net of costs.** A mean of +0.29% is not an edge if the round trip costs
  *    0.30%. Every mean is reported alongside what survives the cost model.
+ *  - **A threshold set for the number of tests actually run.** Forty categories
+ *    at three horizons is over a hundred hypotheses, and judging each at 5%
+ *    means expecting five or six "findings" from noise before a real effect
+ *    exists. The first full run produced exactly seven, every one with a t
+ *    between 2.0 and 2.9. Benjamini-Hochberg control across the whole run
+ *    replaces the per-test cutoff.
  *
  * ## What it still cannot tell you
  *
  * Correlation over one sample of one market regime, not a tradeable edge. It
- * ignores capacity, borrow, the multiple-comparisons problem across the dozen
- * categories it tests at once, and the fact that a published effect decays once
- * it is known. Treat a positive result as permission to test properly, never as
- * a reason to trade.
+ * ignores capacity, borrow, and the fact that a published effect decays once it
+ * is known. Treat a positive result as permission to test properly, never as a
+ * reason to trade.
  */
 
 export interface StudyEvent {
@@ -71,6 +77,18 @@ export interface HorizonResult {
    * that decides a verdict.
    */
   tStat: number;
+  /**
+   * Two-sided p-value for the clustered t, on clusters-1 degrees of freedom.
+   * Not the normal approximation: a standard error clustered over 12 symbols
+   * has 11 degrees of freedom, and pretending otherwise understates the
+   * p-value at exactly the threshold where these calls get made.
+   */
+  pValue: number;
+  /**
+   * Did this test survive false-discovery-rate control across every test the
+   * study ran? This, not the raw t, is what supports a verdict.
+   */
+  survivesMultiplicity: boolean;
   /** Distinct symbols contributing observations. */
   clusters: number;
   /** Share of observations contributed by the single busiest symbol. */
@@ -97,8 +115,23 @@ const MIN_SAMPLE_FOR_A_CLAIM = 30;
  */
 const MIN_CLUSTERS_FOR_A_CLAIM = 10;
 
-/** |t| above this is conventionally "significant" at ~5% for large samples. */
+/**
+ * A test must clear this before it is even *considered* — the conventional 5%
+ * cutoff. Clearing it is no longer sufficient: see FDR_Q.
+ */
 const T_THRESHOLD = 1.96;
+
+/**
+ * Benjamini-Hochberg level. At q=0.10, at most one in ten reported findings is
+ * expected to be false.
+ *
+ * Bonferroni was rejected deliberately: controlling the chance of *any* false
+ * positive across a hundred exploratory tests is so strict that a genuine but
+ * modest effect could never surface. For a screen whose purpose is deciding
+ * what deserves a proper test next, bounding the false share is the right
+ * question.
+ */
+const FDR_Q = 0.1;
 
 /**
  * Round-trip cost of a modelled retail trade, as a percentage of notional:
@@ -257,6 +290,12 @@ export function runEventStudy(input: EventStudyInput): CategoryResult[] {
       }
       const largest = Math.max(0, ...countBySymbol.values());
 
+      const clustered = Number(clusteredTStat(observations).toFixed(3));
+      // Degrees of freedom follow the clusters, not the observations.
+      const degreesOfFreedom = countBySymbol.size - 1;
+      const pValue =
+        degreesOfFreedom > 0 ? studentTTwoSidedP(clustered, degreesOfFreedom) : 1;
+
       horizonResults.push({
         sessions,
         meanAbnormalPct: Number(m.toFixed(4)),
@@ -267,7 +306,11 @@ export function runEventStudy(input: EventStudyInput): CategoryResult[] {
         hitRate: n === 0 ? 0 : Number((values.filter((v) => v > 0).length / n).toFixed(3)),
         stdDevPct: Number(sd.toFixed(4)),
         naiveTStat: Number(naive.toFixed(3)),
-        tStat: Number(clusteredTStat(observations).toFixed(3)),
+        tStat: clustered,
+        pValue: Number(pValue.toFixed(6)),
+        // Filled in below, once every test in the run is known. It cannot be
+        // decided per category: that is the whole point.
+        survivesMultiplicity: false,
         clusters: countBySymbol.size,
         largestClusterShare: n === 0 ? 0 : Number((largest / n).toFixed(3)),
         sampleSize: n,
@@ -279,11 +322,81 @@ export function runEventStudy(input: EventStudyInput): CategoryResult[] {
       category,
       sampleSize: largestSample,
       horizons: horizonResults,
-      verdict: verdictFor(largestSample, horizonResults, costPct),
+      verdict: '',
     });
   }
 
+  applyMultiplicityControl(results);
+
+  for (const result of results) {
+    result.verdict = verdictFor(result.sampleSize, result.horizons, costPct);
+  }
+
   return results.sort((a, b) => b.sampleSize - a.sampleSize);
+}
+
+/**
+ * Every test the run actually made, whatever its outcome.
+ *
+ * The membership rule is deliberately outcome-blind: a horizon qualifies on
+ * sample size and cluster count, both fixed before any return is looked at.
+ * Admitting only the tests that already crossed |t|=1.96 would be selecting the
+ * family on the result — the same bias the correction exists to remove, applied
+ * one level up — and would let a hundred quiet tests vanish from the count that
+ * is supposed to include them.
+ */
+function testableHorizons(results: CategoryResult[]): HorizonResult[] {
+  const family: HorizonResult[] = [];
+  for (const result of results) {
+    for (const horizon of result.horizons) {
+      if (
+        horizon.sampleSize >= MIN_SAMPLE_FOR_A_CLAIM &&
+        horizon.clusters >= MIN_CLUSTERS_FOR_A_CLAIM
+      ) {
+        family.push(horizon);
+      }
+    }
+  }
+  return family;
+}
+
+/**
+ * Decide which tests survive, across the entire run rather than one at a time.
+ *
+ * Whether a t of 2.3 is a finding depends entirely on how many other tests were
+ * run beside it, so this cannot be decided per category — which is why it is a
+ * second pass over the finished results rather than part of building them.
+ */
+function applyMultiplicityControl(results: CategoryResult[]): void {
+  const family = testableHorizons(results);
+  const { discoveries } = benjaminiHochberg(
+    family.map((horizon) => horizon.pValue),
+    FDR_Q,
+  );
+  family.forEach((horizon, index) => {
+    // The |t| bar is kept as a floor on top of FDR. With a large family BH is
+    // the binding constraint anyway; with a small one it stops a p-value that
+    // clears the step-up from reporting a mean that is visibly nothing.
+    horizon.survivesMultiplicity =
+      discoveries.has(index) && Math.abs(horizon.tStat) >= T_THRESHOLD;
+  });
+}
+
+/** How many tests the run made, how many looked significant, how many survived. */
+export function multiplicitySummary(results: CategoryResult[]): {
+  /** Every test weighed, including the quiet ones. */
+  tested: number;
+  /** Those that crossed |t|=1.96 — what a per-test cutoff would have reported. */
+  nominal: number;
+  /** Those still standing once the whole family is accounted for. */
+  survivors: number;
+} {
+  const family = testableHorizons(results);
+  return {
+    tested: family.length,
+    nominal: family.filter((h) => Math.abs(h.tStat) >= T_THRESHOLD).length,
+    survivors: family.filter((h) => h.survivesMultiplicity).length,
+  };
 }
 
 /**
@@ -308,13 +421,18 @@ function verdictFor(sampleSize: number, horizons: HorizonResult[], costPct: numb
     return `${sampleSize} observations but only ${clusters} distinct symbol(s) — this could be one company's history, not an effect`;
   }
 
-  const significant = horizons.filter(
-    (h) =>
-      Math.abs(h.tStat) >= T_THRESHOLD &&
-      h.sampleSize >= MIN_SAMPLE_FOR_A_CLAIM &&
-      h.clusters >= MIN_CLUSTERS_FOR_A_CLAIM,
-  );
+  const significant = horizons.filter((h) => h.survivesMultiplicity);
   if (significant.length === 0) {
+    // Distinguish "nothing here" from "something that would have passed alone".
+    const nominal = horizons.filter(
+      (h) =>
+        Math.abs(h.tStat) >= T_THRESHOLD &&
+        h.sampleSize >= MIN_SAMPLE_FOR_A_CLAIM &&
+        h.clusters >= MIN_CLUSTERS_FOR_A_CLAIM,
+    );
+    if (nominal.length > 0) {
+      return `crosses |t|=${T_THRESHOLD} at +${nominal.map((h) => h.sessions).join('/')}d but does not survive the number of tests this run made — expected from noise`;
+    }
     return `no abnormal drift distinguishable from noise across ${sampleSize} observations`;
   }
 

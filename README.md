@@ -285,6 +285,18 @@ usual version of this does not:
 - **Net of costs.** A mean of +0.29% is not an edge when the round trip costs 0.30%. Every
   mean is shown alongside what survives the cost model for the position size this account
   would actually trade.
+- **A threshold set for the number of tests actually run.** Forty categories at three
+  horizons is over a hundred hypotheses in one run; at a 5% per-test cutoff, five or six
+  cross it from noise before a single real effect exists. The first full run produced
+  exactly seven "findings", every one with a t between 2.0 and 2.9 — the signature of a
+  threshold crossed by chance. Benjamini-Hochberg control at q=0.10 across the whole run
+  replaces the per-test cutoff, and the family it corrects over is every test that met the
+  sample and cluster bars, not just the ones that looked good. Selecting the family on the
+  outcome is the same bias one level up.
+
+Under that standard, the first 40-symbol run reports **no findings at all**: 7 categories
+crossed |t|=1.96, none survived. That is the honest result, and it is the one the agent acts
+on.
 
 `--out` writes the result to `data/evidence.json`, which the agent reads at startup. What it
 does with it is deliberately one-sided:

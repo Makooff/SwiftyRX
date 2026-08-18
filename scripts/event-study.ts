@@ -2,7 +2,7 @@
 import { loadConfig } from '../src/config/env.js';
 import { loadEnvFile } from '../src/config/load-env.js';
 import { createLogger } from '../src/core/logger.js';
-import { runEventStudy, type StudyEvent } from '../src/backtesting/event-study.js';
+import { multiplicitySummary, runEventStudy, type StudyEvent } from '../src/backtesting/event-study.js';
 import { roundTripCostPercent } from '../src/execution/costs.js';
 import { summariseEvidence, writeEvidenceFile } from '../src/strategy/evidence.js';
 import { buildIngestionStack } from '../src/ingestion/pipeline.js';
@@ -178,7 +178,7 @@ for (const result of results) {
       `  +${String(horizon.sessions).padEnd(2)}d  mean ${horizon.meanAbnormalPct.toFixed(3).padStart(8)}%  ` +
         `net ${horizon.meanNetOfCostsPct.toFixed(3).padStart(8)}%  ` +
         `hit ${(horizon.hitRate * 100).toFixed(1).padStart(5)}%  ` +
-        `t ${clusteredT(horizon).padStart(6)} (naive ${horizon.naiveTStat.toFixed(2)})  ` +
+        `t ${clusteredT(horizon).padStart(6)}${horizon.survivesMultiplicity ? '*' : ' '} (naive ${horizon.naiveTStat.toFixed(2)})  ` +
         `n=${horizon.sampleSize} over ${horizon.clusters} sym` +
         (horizon.largestClusterShare >= 0.3
           ? `, busiest ${(horizon.largestClusterShare * 100).toFixed(0)}%`
@@ -188,15 +188,31 @@ for (const result of results) {
   console.log(`  -> ${result.verdict}\n`);
 }
 
+const multiplicity = multiplicitySummary(results);
+console.log(
+  `Multiplicity: ${multiplicity.tested} tests run, ${multiplicity.nominal} crossed |t|=1.96, ` +
+    `${multiplicity.survivors} survived false-discovery control at q=0.10.`,
+);
+if (multiplicity.nominal > multiplicity.survivors) {
+  const expectedByChance = (multiplicity.tested * 0.05).toFixed(0);
+  console.log(
+    `  At a 5% per-test cutoff, ~${expectedByChance} of ${multiplicity.tested} would cross from noise alone` +
+      `${multiplicity.survivors === 0 ? ' — which is what happened here.' : '.'}`,
+  );
+}
+console.log('');
+
 console.log('Reading these numbers:');
 console.log(`  "net" subtracts a ${roundTripCostPct}% modelled round trip. A gross mean smaller`);
 console.log('  than that is not an edge, however significant it is.');
 console.log('  "t" is clustered by symbol: filings from one company are not independent');
 console.log('  observations, and at +20d their windows overlap. The naive t in brackets');
 console.log('  is what treating them as independent would have claimed.');
-console.log('  A dozen categories are tested at once, so one of them crossing |t|=1.96');
-console.log('  by chance is expected. A surviving result is permission to test');
-console.log('  properly — never a reason to trade.\n');
+console.log('  A trailing * marks a test that survived false-discovery control across');
+console.log('  every test this run made. Crossing |t|=1.96 alone means little here:');
+console.log('  at a hundred tests, five or six cross it from noise alone.');
+console.log('  A surviving result is permission to test properly — never a reason');
+console.log('  to trade.\n');
 
 // --- Evidence book -----------------------------------------------------------
 // Written only when asked for. What the agent does with it is one-sided: a
