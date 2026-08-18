@@ -159,6 +159,17 @@ export class SecEdgarAdapter implements DocumentSource {
     return map;
   }
 
+  /**
+   * Fetch filings for every configured ticker.
+   *
+   * The budget is divided **per ticker**, not applied to the concatenation.
+   * Truncating the combined list is order-biased in the worst possible way:
+   * the tickers polled first are the chatty ones (a large cap files hundreds
+   * of Form 4s a year), so a global cap is spent entirely on the head of the
+   * watchlist and the tail is never seen at all. A study of "40 symbols" that
+   * silently became a study of 7 is how that failure looks from the outside,
+   * and nothing in the output said so.
+   */
   async fetchDocuments(window: FetchWindow = {}): Promise<NormalizedDocument[]> {
     if (!this.isConfigured()) {
       this.log.warn({}, 'CONTACT_EMAIL is not set; skipping SEC EDGAR (required by SEC policy)');
@@ -169,6 +180,12 @@ export class SecEdgarAdapter implements DocumentSource {
     const cikMap = await this.loadCikMap();
     const out: NormalizedDocument[] = [];
 
+    const perTicker = window.limit
+      ? Math.max(1, Math.floor(window.limit / this.tickers.length))
+      : undefined;
+    const capped: string[] = [];
+    const shallow: string[] = [];
+
     for (const ticker of this.tickers) {
       const cik = cikMap.get(ticker);
       if (!cik) {
@@ -176,14 +193,53 @@ export class SecEdgarAdapter implements DocumentSource {
         continue;
       }
       try {
-        out.push(...(await this.fetchFilings(ticker, cik, window)));
+        const filings = await this.fetchFilings(ticker, cik, window);
+
+        // The submissions index carries only a company's most recent filings.
+        // When the oldest one it returned is still newer than the requested
+        // start, the window is not merely small — it is incomplete, and any
+        // per-period statistic computed from it is wrong rather than noisy.
+        if (window.since && filings.length > 0 && !this.reachesBack(filings, window.since)) {
+          shallow.push(ticker);
+        }
+
+        if (perTicker !== undefined && filings.length > perTicker) capped.push(ticker);
+        out.push(...(perTicker === undefined ? filings : filings.slice(0, perTicker)));
       } catch (err) {
         this.log.warn({ ticker, error: (err as Error).message }, 'filing fetch failed');
       }
     }
 
+    if (capped.length > 0) {
+      this.log.warn(
+        { perTicker, tickers: capped.slice(0, 10), count: capped.length },
+        'per-ticker filing budget reached — those tickers returned an INCOMPLETE set; raise the limit',
+      );
+    }
+    if (shallow.length > 0) {
+      this.log.warn(
+        { since: window.since?.toISOString(), tickers: shallow.slice(0, 10), count: shallow.length },
+        "EDGAR's recent-filings index does not reach back to the requested start for these tickers — their history is INCOMPLETE",
+      );
+    }
+
     if (out.length > 0) this.lastSuccessAt = this.clock.now().toISOString();
-    return window.limit ? out.slice(0, window.limit) : out;
+    // Newest first across the whole set, so a downstream consumer that does
+    // take a head slice takes the most recent filings rather than whichever
+    // ticker happened to be polled first.
+    return out.sort((a, b) => (b.published_at ?? '').localeCompare(a.published_at ?? ''));
+  }
+
+  /** Did this ticker's filings actually go back as far as was asked for? */
+  private reachesBack(filings: NormalizedDocument[], since: Date): boolean {
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const filing of filings) {
+      const ms = filing.published_at ? Date.parse(filing.published_at) : Number.NaN;
+      if (!Number.isNaN(ms) && ms < oldest) oldest = ms;
+    }
+    // A margin of one day absorbs the difference between the requested instant
+    // and the first trading day that actually carried a filing.
+    return oldest <= since.getTime() + 86_400_000;
   }
 
   private async fetchFilings(

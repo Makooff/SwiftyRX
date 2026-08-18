@@ -60,8 +60,23 @@ if (!secSource) {
   process.exit(1);
 }
 
-console.log('Fetching filings...');
-const documents = await secSource.fetchDocuments({ since, limit: 5000 });
+// The budget is per ticker (see SecEdgarAdapter.fetchDocuments), and a large
+// cap files hundreds of Form 4s a year, so five years needs real depth per
+// name. A global cap divided by 40 symbols is how a study of 40 companies
+// quietly became a study of 7.
+const PER_SYMBOL_FILINGS = 1500;
+
+// --symbols must drive the filings too, not only the prices: without this the
+// study would price one set of companies and study the filings of another.
+if ('setTickers' in secSource && typeof secSource.setTickers === 'function') {
+  (secSource as unknown as { setTickers: (t: string[]) => void }).setTickers(symbols);
+}
+
+console.log(`Fetching filings (up to ${PER_SYMBOL_FILINGS} per symbol)...`);
+const documents = await secSource.fetchDocuments({
+  since,
+  limit: symbols.length * PER_SYMBOL_FILINGS,
+});
 
 const events: StudyEvent[] = [];
 for (const doc of documents) {
@@ -78,7 +93,22 @@ for (const doc of documents) {
   events.push({ symbol, at: doc.published_at, category });
 }
 
-console.log(`  ${documents.length} filings → ${events.length} usable events\n`);
+// Coverage first, because every number below is conditional on it. A study
+// that silently covers a seventh of the requested universe is not a small
+// version of the intended study — it is a study of different companies.
+const symbolsWithEvents = new Set(events.map((event) => event.symbol));
+const missing = symbols.filter((symbol) => !symbolsWithEvents.has(symbol));
+
+console.log(`  ${documents.length} filings → ${events.length} usable events`);
+console.log(
+  `  covering ${symbolsWithEvents.size}/${symbols.length} requested symbol(s)` +
+    (missing.length > 0 ? ` — NO filings for: ${missing.slice(0, 12).join(', ')}${missing.length > 12 ? ` (+${missing.length - 12})` : ''}` : ''),
+);
+if (symbolsWithEvents.size < symbols.length) {
+  console.log('  !! Results below describe the covered symbols only, not the watchlist.\n');
+} else {
+  console.log('');
+}
 
 if (events.length === 0) {
   console.log('Nothing to study. Widen WATCHLIST or --years.\n');
@@ -128,6 +158,17 @@ if (!benchmarkBars) {
   console.log('!! Returns below are RAW, not market-adjusted. A rising market will look like an edge.\n');
 }
 
+/**
+ * A clustered standard error estimated from a handful of groups is not a small
+ * number with wide error bars — it is arithmetic on nothing, and prints as
+ * t=-235 on three observations. Showing a dash says that plainly; the verdict
+ * already refuses to use it.
+ */
+const MIN_CLUSTERS_TO_PRINT_A_T = 5;
+function clusteredT(horizon: { tStat: number; clusters: number }): string {
+  return horizon.clusters < MIN_CLUSTERS_TO_PRINT_A_T ? '  n/a' : horizon.tStat.toFixed(2);
+}
+
 for (const result of results) {
   console.log(`=== ${result.category} ===`);
   console.log(`  observations           ${result.sampleSize}`);
@@ -137,7 +178,7 @@ for (const result of results) {
       `  +${String(horizon.sessions).padEnd(2)}d  mean ${horizon.meanAbnormalPct.toFixed(3).padStart(8)}%  ` +
         `net ${horizon.meanNetOfCostsPct.toFixed(3).padStart(8)}%  ` +
         `hit ${(horizon.hitRate * 100).toFixed(1).padStart(5)}%  ` +
-        `t ${horizon.tStat.toFixed(2).padStart(6)} (naive ${horizon.naiveTStat.toFixed(2)})  ` +
+        `t ${clusteredT(horizon).padStart(6)} (naive ${horizon.naiveTStat.toFixed(2)})  ` +
         `n=${horizon.sampleSize} over ${horizon.clusters} sym` +
         (horizon.largestClusterShare >= 0.3
           ? `, busiest ${(horizon.largestClusterShare * 100).toFixed(0)}%`
