@@ -130,8 +130,43 @@ export function defaultEnabledFeeds(): FeedDefinition[] {
   return OFFICIAL_FEEDS;
 }
 
-export function selectFeeds(enabledIds: string[]): FeedDefinition[] {
-  if (enabledIds.length === 0) return defaultEnabledFeeds();
+/**
+ * Every feed, official and news. The only way to say "all of them" without
+ * naming nine ids from memory and silently losing the one you mistyped.
+ */
+export const ALL_FEEDS_SENTINEL = 'all';
+
+export interface FeedSelection {
+  feeds: FeedDefinition[];
+  /**
+   * Ids in ENABLED_SOURCES that match no known feed.
+   *
+   * Reported rather than swallowed. A dropped typo turns a feed the operator
+   * believes is running into one that is not, and the symptom — fewer
+   * documents than expected — looks exactly like a quiet news day.
+   */
+  unknownIds: string[];
+}
+
+export function selectFeedsDetailed(enabledIds: string[]): FeedSelection {
+  if (enabledIds.length === 0) return { feeds: defaultEnabledFeeds(), unknownIds: [] };
+  if (enabledIds.some((id) => id.trim().toLowerCase() === ALL_FEEDS_SENTINEL)) {
+    return { feeds: ALL_FEEDS, unknownIds: [] };
+  }
+
   const byId = new Map(ALL_FEEDS.map((f) => [f.id, f]));
-  return enabledIds.map((id) => byId.get(id)).filter((f): f is FeedDefinition => f !== undefined);
+  const feeds: FeedDefinition[] = [];
+  const unknownIds: string[] = [];
+
+  for (const id of enabledIds) {
+    const feed = byId.get(id);
+    if (feed) feeds.push(feed);
+    else unknownIds.push(id);
+  }
+
+  return { feeds, unknownIds };
+}
+
+export function selectFeeds(enabledIds: string[]): FeedDefinition[] {
+  return selectFeedsDetailed(enabledIds).feeds;
 }

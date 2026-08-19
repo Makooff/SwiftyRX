@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FixedClock } from '../src/core/clock.js';
 import { Deduplicator } from '../src/ingestion/dedup.js';
+import { ALL_FEEDS, OFFICIAL_FEEDS, selectFeedsDetailed } from '../src/ingestion/feeds.js';
 import {
   extractExplicitTickers,
   normalizeDocument,
@@ -188,5 +189,51 @@ describe('Deduplicator', () => {
     const { kept, results } = dedup.process([doc, doc]);
     expect(kept).toHaveLength(1);
     expect(results.map((r) => r.status)).toEqual(['new', 'exact_duplicate']);
+  });
+});
+
+describe('choosing which feeds run', () => {
+  /**
+   * The most common state of this system is "Documents ingested: none", and it
+   * is also the most ambiguous: a broken fetch, a quiet news day and a feed set
+   * that publishes nothing about companies all look identical downstream. These
+   * cases are about making the third one distinguishable.
+   */
+
+  it('falls back to official feeds when nothing is configured', () => {
+    const { feeds, unknownIds } = selectFeedsDetailed([]);
+    expect(feeds).toEqual(OFFICIAL_FEEDS);
+    expect(unknownIds).toEqual([]);
+  });
+
+  it('turns everything on for the "all" sentinel', () => {
+    // Otherwise the only way to enable company news is to type nine ids from
+    // memory, and the one you mistype is silently absent.
+    const { feeds } = selectFeedsDetailed(['all']);
+    expect(feeds).toEqual(ALL_FEEDS);
+    expect(feeds.some((f) => f.category === 'news')).toBe(true);
+  });
+
+  it('accepts the sentinel whatever its case or spacing', () => {
+    expect(selectFeedsDetailed([' ALL ']).feeds).toEqual(ALL_FEEDS);
+  });
+
+  it('reports an id that matches no feed instead of dropping it', () => {
+    // A swallowed typo turns a feed the operator believes is running into one
+    // that is not, and the symptom looks exactly like a quiet news day.
+    const { feeds, unknownIds } = selectFeedsDetailed(['ecb_press', 'cnbc_finanace']);
+    expect(feeds.map((f) => f.id)).toEqual(['ecb_press']);
+    expect(unknownIds).toEqual(['cnbc_finanace']);
+  });
+
+  it('still runs the feeds it did recognise', () => {
+    // One bad id must not take the good ones down with it.
+    expect(selectFeedsDetailed(['nope', 'sec_press']).feeds.map((f) => f.id)).toEqual(['sec_press']);
+  });
+
+  it('keeps every official feed free of a company-news category', () => {
+    // The claim the dashboard makes when news is zero — "macro only, so a quiet
+    // funnel is the feed set rather than a fault" — is only true if this holds.
+    expect(OFFICIAL_FEEDS.every((f) => f.category === 'official')).toBe(true);
   });
 });
