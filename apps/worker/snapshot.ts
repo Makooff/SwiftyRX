@@ -4,6 +4,7 @@ import { diagnose, summarise, type Diagnostic, type DoctorSummary } from '../../
 import type { HealthReport } from '../../src/domain/types.js';
 import { FUNNEL_STAGE_LABELS, type CycleFunnel } from '../../src/monitoring/cycle-funnel.js';
 import type { ActivityEntry } from '../../src/monitoring/activity-log.js';
+import { isMeasurable } from '../../src/strategy/evidence.js';
 import type { AgentState, TradingAgent } from './agent.js';
 
 /**
@@ -54,6 +55,17 @@ export interface AgentSnapshot {
     categoriesMeasured: number;
     categoriesSupported: number;
   };
+  /** What the decisions actually did, once their horizons elapsed. */
+  outcomes: {
+    rates: Record<string, { hitRate: number; sampleSize: number }>;
+    /** Horizon passed, price not published yet. */
+    pending: number;
+  };
+  /**
+   * Recent event types no study can ever measure, so the evidence gate can
+   * never have an opinion on them however they perform.
+   */
+  unmeasurableEventTypes: Array<{ type: string; recentEvents: number }>;
 }
 
 function gitInfo(): GitInfo {
@@ -69,6 +81,24 @@ function gitInfo(): GitInfo {
     // the whole snapshot over.
     return {};
   }
+}
+
+/**
+ * Recent event types the evidence gate structurally cannot reach, counted.
+ *
+ * Reported even when empty is not useful, so the caller drops empties — but a
+ * non-empty list means the agent is acting on events no study result could
+ * ever veto, which is worth seeing rather than inferring.
+ */
+export function unmeasurableFrom(agent: TradingAgent): AgentSnapshot['unmeasurableEventTypes'] {
+  const counts = new Map<string, number>();
+  for (const event of agent.getEvents()) {
+    if (isMeasurable(event.type)) continue;
+    counts.set(event.type, (counts.get(event.type) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([type, recentEvents]) => ({ type, recentEvents }))
+    .sort((a, b) => b.recentEvents - a.recentEvents);
 }
 
 export function buildSnapshot(agent: TradingAgent, config: AppConfig): AgentSnapshot {
@@ -112,6 +142,8 @@ export function buildSnapshot(agent: TradingAgent, config: AppConfig): AgentSnap
         };
       }),
     },
+    outcomes: agent.getHitRates(),
+    unmeasurableEventTypes: unmeasurableFrom(agent),
     ...(agent.evidence
       ? {
           evidence: {
@@ -196,6 +228,28 @@ export function formatSnapshotText(snapshot: AgentSnapshot): string {
       `  ${pos.symbol}: ${pos.quantity} @ ${pos.averagePrice.toFixed(2)}, value ${pos.marketValue.toFixed(2)}, ` +
         `unrealised ${pos.unrealisedPnl.toFixed(2)}${exit}`,
     );
+  }
+
+  section('Decision outcomes');
+  const rates = Object.entries(snapshot.outcomes.rates);
+  if (rates.length === 0) {
+    lines.push('  nothing scored yet — no decision has passed its horizon with a published price');
+  }
+  for (const [type, { hitRate, sampleSize }] of rates.sort((a, b) => b[1].sampleSize - a[1].sampleSize)) {
+    // n is printed beside every rate: 3 out of 4 is not a hit rate.
+    lines.push(`  ${type.padEnd(22)} ${(hitRate * 100).toFixed(1)}% of n=${sampleSize}`);
+  }
+  if (snapshot.outcomes.pending > 0) {
+    lines.push(`  ${snapshot.outcomes.pending} decision(s) due but not yet priced`);
+  }
+
+  if (snapshot.unmeasurableEventTypes.length > 0) {
+    section('Event types no study can measure');
+    lines.push('  These pass the evidence gate by default — no category maps onto them,');
+    lines.push('  so a study result could never block them however they perform.');
+    for (const { type, recentEvents } of snapshot.unmeasurableEventTypes) {
+      lines.push(`  ${type.padEnd(22)} ${recentEvents} recent event(s)`);
+    }
   }
 
   section('Evidence ledger');

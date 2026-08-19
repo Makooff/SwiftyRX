@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { type Clock, systemClock } from '../core/clock.js';
+import { horizonDays } from '../risk/position-manager.js';
 import type { RiskDecision } from '../risk/types.js';
 import type { Signal } from '../strategy/signals/types.js';
 import type { Order } from '../execution/broker/types.js';
@@ -20,10 +21,25 @@ import type { Order } from '../execution/broker/types.js';
  *
  * Stored as JSON Lines: append-only, greppable, and impossible to corrupt
  * halfway through in a way that loses earlier entries.
+ *
+ * That append-only property is why an outcome, which is only known days after
+ * the decision, is written as its own line rather than by rewriting the
+ * decision in place. `readAll` folds each outcome onto the decision it
+ * completes, so callers see one entry with its outcome attached and never have
+ * to know. Rewriting the file to patch a field would trade the guarantee in the
+ * paragraph above for tidiness.
  */
 
 export interface JournalEntry {
   timestamp: string;
+  /**
+   * The signal this decision came from — the key an outcome line refers back
+   * to. Optional because entries written before outcomes existed have none, and
+   * those can never be completed rather than being silently mismatched.
+   */
+  signalId?: string;
+  /** The horizon the thesis claimed, which decides when the outcome is due. */
+  expectedHorizon?: Signal['expectedHorizon'];
   eventId: string;
   eventType: string;
   eventHeadline: string;
@@ -71,6 +87,117 @@ export interface JournalEntry {
   provenance: Signal['provenance'];
 }
 
+export type DecisionOutcome = NonNullable<JournalEntry['outcome']>;
+
+/**
+ * The second kind of line in the journal: an outcome completing an earlier
+ * decision. Discriminated by `kind`, which decision lines never carry.
+ */
+export interface OutcomeRecord {
+  kind: 'outcome';
+  signalId: string;
+  outcome: DecisionOutcome;
+}
+
+function isOutcomeRecord(line: unknown): line is OutcomeRecord {
+  return typeof line === 'object' && line !== null && (line as OutcomeRecord).kind === 'outcome';
+}
+
+/**
+ * Whether this action predicted a direction at all.
+ *
+ * HOLD and WATCH do not: the scorer calls them "non-directional" and caps their
+ * score outright. Scoring them for correctness would need a definition of
+ * "right" that nothing in the system states — so they are left unevaluated
+ * rather than given an invented one.
+ */
+export function isDirectional(action: Signal['action']): boolean {
+  return action === 'BUY' || action === 'SELL';
+}
+
+/** When a decision's horizon has run out and its outcome can be looked up. */
+export function outcomeDueAt(entry: JournalEntry): Date {
+  return new Date(
+    Date.parse(entry.timestamp) + horizonDays(entry.expectedHorizon) * 86_400_000,
+  );
+}
+
+/**
+ * Can this entry ever receive an outcome?
+ *
+ * Deliberately separate from "is it due yet": an entry that will never be
+ * evaluable should be skipped silently forever, whereas one that is merely
+ * early should be retried.
+ */
+export function isEvaluable(entry: JournalEntry): boolean {
+  return (
+    !entry.outcome &&
+    entry.signalId !== undefined &&
+    isDirectional(entry.signal) &&
+    entry.priceAtSignal !== null &&
+    entry.priceAtSignal !== 0
+  );
+}
+
+/**
+ * Score a decision against the price its horizon actually produced.
+ *
+ * BUY is right when the price rose, SELL when it fell — the same idiom the
+ * scorer already uses. A flat move counts as wrong for both: predicting a
+ * direction and getting none is not a hit.
+ */
+export function buildOutcome(
+  entry: JournalEntry,
+  priceAfter: number,
+  evaluatedAt: string,
+): DecisionOutcome {
+  const entryPrice = entry.priceAtSignal!;
+  const returnPct = ((priceAfter - entryPrice) / entryPrice) * 100;
+  return {
+    evaluatedAt,
+    priceAfter,
+    returnPct,
+    directionCorrect: entry.signal === 'BUY' ? returnPct > 0 : returnPct < 0,
+    horizonDays: horizonDays(entry.expectedHorizon),
+  };
+}
+
+/** Decisions ready to be priced: horizon elapsed, outcome still unknown. */
+export function pendingFrom(entries: JournalEntry[], now: Date): JournalEntry[] {
+  return entries.filter(
+    (entry) => isEvaluable(entry) && outcomeDueAt(entry).getTime() <= now.getTime(),
+  );
+}
+
+/**
+ * Hit rate per event type, over entries whose outcome is known.
+ *
+ * A pure function over entries already in hand, so a caller that has just read
+ * the journal for another reason does not read it again.
+ *
+ * Returns the sample size alongside every rate, because a hit rate without an n
+ * is not a statistic — and the scorer refuses to use one below n=30.
+ */
+export function hitRatesFrom(
+  entries: JournalEntry[],
+): Record<string, { hitRate: number; sampleSize: number }> {
+  const buckets: Record<string, { wins: number; total: number }> = {};
+
+  for (const entry of entries) {
+    if (!entry.outcome) continue;
+    const bucket = (buckets[entry.eventType] ??= { wins: 0, total: 0 });
+    bucket.total += 1;
+    if (entry.outcome.directionCorrect) bucket.wins += 1;
+  }
+
+  return Object.fromEntries(
+    Object.entries(buckets).map(([type, { wins, total }]) => [
+      type,
+      { hitRate: total > 0 ? wins / total : 0, sampleSize: total },
+    ]),
+  );
+}
+
 export interface JournalOptions {
   path?: string;
   clock?: Clock;
@@ -99,6 +226,8 @@ export class DecisionJournal {
 
     const entry: JournalEntry = {
       timestamp: this.clock.now().toISOString(),
+      signalId: signal.id,
+      expectedHorizon: signal.expectedHorizon,
       eventId: signal.eventId,
       eventType: input.eventType,
       eventHeadline: input.eventHeadline.slice(0, 300),
@@ -145,9 +274,21 @@ export class DecisionJournal {
     return entry;
   }
 
-  private async append(entry: JournalEntry): Promise<void> {
+  private async append(line: JournalEntry | OutcomeRecord): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
-    await appendFile(this.path, `${JSON.stringify(entry)}\n`, 'utf8');
+    await appendFile(this.path, `${JSON.stringify(line)}\n`, 'utf8');
+  }
+
+  /**
+   * Complete an earlier decision with what actually happened.
+   *
+   * Appended, never patched in place — see the note at the top of this file.
+   * Re-recording the same signal is harmless: the last outcome on disk wins.
+   */
+  async recordOutcome(signalId: string, outcome: DecisionOutcome): Promise<void> {
+    await this.append({ kind: 'outcome', signalId, outcome });
+    const buffered = this.buffer.find((entry) => entry.signalId === signalId);
+    if (buffered) buffered.outcome = outcome;
   }
 
   /** Entries recorded by this process. */
@@ -155,42 +296,57 @@ export class DecisionJournal {
     return [...this.buffer];
   }
 
-  /** Read the full journal from disk, including earlier runs. */
+  /**
+   * Read the full journal from disk, including earlier runs, with each outcome
+   * folded onto the decision it completes.
+   *
+   * Callers see decisions, never the outcome lines themselves — the two-line
+   * storage is an implementation detail of staying append-only.
+   */
   async readAll(): Promise<JournalEntry[]> {
+    let raw: string;
     try {
-      const raw = await readFile(this.path, 'utf8');
-      return raw
-        .split('\n')
-        .filter((line) => line.trim())
-        .map((line) => JSON.parse(line) as JournalEntry);
+      raw = await readFile(this.path, 'utf8');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw err;
     }
+
+    const decisions: JournalEntry[] = [];
+    const outcomes = new Map<string, DecisionOutcome>();
+
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line) as JournalEntry | OutcomeRecord;
+      // Last outcome for a signal wins, so a re-evaluation supersedes rather
+      // than duplicating.
+      if (isOutcomeRecord(parsed)) outcomes.set(parsed.signalId, parsed.outcome);
+      else decisions.push(parsed);
+    }
+
+    for (const decision of decisions) {
+      if (!decision.signalId) continue;
+      const outcome = outcomes.get(decision.signalId);
+      if (outcome) decision.outcome = outcome;
+    }
+
+    return decisions;
   }
 
   /**
-   * Hit rate per event type, from entries whose outcome is known.
+   * Decisions whose horizon has run out and whose outcome is still unknown,
+   * oldest first.
    *
-   * Returns the sample size alongside every rate, because a hit rate without
-   * an n is not a statistic — and the scorer refuses to use one below n=30.
+   * Pure and I/O-free beyond the read: whether a price is *available* for the
+   * date is the caller's problem, because that is the part that costs an API
+   * call.
    */
+  async pendingOutcomes(now: Date): Promise<JournalEntry[]> {
+    return pendingFrom(await this.readAll(), now);
+  }
+
+  /** Hit rate per event type, from entries whose outcome is known. */
   async hitRateByEventType(): Promise<Record<string, { hitRate: number; sampleSize: number }>> {
-    const entries = await this.readAll();
-    const buckets: Record<string, { wins: number; total: number }> = {};
-
-    for (const entry of entries) {
-      if (!entry.outcome) continue;
-      const bucket = (buckets[entry.eventType] ??= { wins: 0, total: 0 });
-      bucket.total += 1;
-      if (entry.outcome.directionCorrect) bucket.wins += 1;
-    }
-
-    return Object.fromEntries(
-      Object.entries(buckets).map(([type, { wins, total }]) => [
-        type,
-        { hitRate: total > 0 ? wins / total : 0, sampleSize: total },
-      ]),
-    );
+    return hitRatesFrom(await this.readAll());
   }
 }

@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { CategoryResult, HorizonResult } from '../backtesting/event-study.js';
+import { T_THRESHOLD, type CategoryResult, type HorizonResult } from '../backtesting/event-study.js';
 import { SEC_FORM_RULES, SEC_ITEM_RULES } from '../intelligence/event_detector/rules.js';
 import type { EventType } from '../intelligence/types.js';
 
@@ -20,6 +20,10 @@ import type { EventType } from '../intelligence/types.js';
  *    anything. Even after false-discovery-rate control across the whole run,
  *    it is one sample of one market regime. Support is recorded and shown; it
  *    never lowers a gate.
+ *
+ * The two directions are held to different statistical bars, for the reasons
+ * set out on `veto()` below: claiming an edge must survive the number of tests
+ * the run made, refusing one must not depend on it.
  *
  * That asymmetry is the honest reading of a single backtest, and it is what
  * keeps this from becoming a machine for finding reasons to trade.
@@ -86,18 +90,71 @@ export function eventTypeForCategory(category: string): EventType | undefined {
 }
 
 /**
- * A test the book is willing to act on.
+ * Event types a study could ever have an opinion about.
  *
- * `survivesMultiplicity` already carries the sample and cluster bars — it is
- * only ever set on tests that cleared them — but they are restated here so the
- * book's own standard is legible without reading the study, and so an older or
- * hand-written file cannot slip through on the flag alone.
+ * `eventTypeForCategory` reads only the two SEC tables, so an event type that
+ * appears in neither can never be attached to a measured category — and
+ * therefore can never be blocked, however badly it performs. That includes
+ * everything the keyword rules produce from press releases and feeds:
+ * monetary_policy, macro_release, trade_policy, sanctions, legal_action,
+ * guidance, product.
+ *
+ * Derived from the same tables rather than listed by hand, so it cannot fall
+ * out of step with what the mapping actually does. It exists to make the gap
+ * visible: silently trading types the evidence gate structurally cannot reach
+ * is the failure this reports.
  */
-function significant(horizon: HorizonResult): boolean {
+export const MEASURABLE_EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
+  ...Object.values(SEC_ITEM_RULES).map((rule) => rule.type),
+  ...Object.values(SEC_FORM_RULES).map((rule) => rule.type),
+]);
+
+/** Could any study result ever gate this event type? */
+export function isMeasurable(type: EventType): boolean {
+  return MEASURABLE_EVENT_TYPES.has(type);
+}
+
+/**
+ * The sample a test needs before it means anything at all, in either direction.
+ *
+ * Restated here rather than inferred from `survivesMultiplicity` so the book's
+ * own standard is legible without reading the study, and so an older or
+ * hand-written file cannot slip through on a flag alone.
+ */
+function measurable(horizon: HorizonResult): boolean {
+  return horizon.sampleSize >= MIN_SAMPLE && horizon.clusters >= MIN_CLUSTERS;
+}
+
+/**
+ * Strong enough to *claim an edge*: false-discovery-rate control across every
+ * test the run made. Unchanged, and deliberately strict.
+ */
+function discovery(horizon: HorizonResult): boolean {
+  return measurable(horizon) && horizon.survivesMultiplicity;
+}
+
+/**
+ * Strong enough to *refuse*: the nominal test, deliberately NOT corrected for
+ * multiplicity.
+ *
+ * This looks like a double standard and is one, because the two errors are not
+ * the same size. A false discovery puts money into noise; a false veto costs a
+ * trade we would probably not have wanted. Benjamini-Hochberg bounds the share
+ * of false *claims*, which is the wrong quantity to protect when the output is
+ * a refusal.
+ *
+ * The structural reason matters more. BH's threshold depends on how many other
+ * tests the run happened to make, so a category measured drifting against a
+ * long could lose its veto because unrelated categories were added to the study
+ * — the evidence against it unchanged, the block gone. Connecting more sources
+ * would silently unblock things. Holding the veto to a fixed nominal bar makes
+ * it **monotone**: adding tests elsewhere can never remove an existing refusal.
+ */
+function veto(horizon: HorizonResult): boolean {
   return (
-    horizon.sampleSize >= MIN_SAMPLE &&
-    horizon.clusters >= MIN_CLUSTERS &&
-    horizon.survivesMultiplicity
+    measurable(horizon) &&
+    Math.abs(horizon.tStat) >= T_THRESHOLD &&
+    horizon.meanAbnormalPct < 0
   );
 }
 
@@ -105,24 +162,25 @@ function statusFor(result: CategoryResult): {
   status: EvidenceStatus;
   horizon?: HorizonResult;
 } {
-  const tested = result.horizons.filter(significant);
-  if (tested.length === 0) {
+  // Refusal is decided first, and on its own bar. An adverse horizon settles
+  // the category even when another horizon looks good: a drift that turns
+  // against the position inside the holding period is not something to average
+  // away.
+  const adverse = result.horizons.filter(veto);
+  if (adverse.length > 0) {
+    const worst = adverse.reduce((a, b) => (a.meanAbnormalPct <= b.meanAbnormalPct ? a : b));
+    return { status: 'adverse', horizon: worst };
+  }
+
+  const discovered = result.horizons.filter(discovery);
+  if (discovered.length === 0) {
     const enough =
       result.sampleSize >= MIN_SAMPLE &&
       Math.max(...result.horizons.map((h) => h.clusters), 0) >= MIN_CLUSTERS;
     return { status: enough ? 'inconclusive' : 'untested' };
   }
 
-  // An adverse horizon decides the category even when another horizon looks
-  // good: a drift that turns against the position inside the holding period is
-  // not something to average away.
-  const adverse = tested.filter((h) => h.meanAbnormalPct < 0);
-  if (adverse.length > 0) {
-    const worst = adverse.reduce((a, b) => (a.meanAbnormalPct <= b.meanAbnormalPct ? a : b));
-    return { status: 'adverse', horizon: worst };
-  }
-
-  const best = tested.reduce((a, b) => (a.meanNetOfCostsPct >= b.meanNetOfCostsPct ? a : b));
+  const best = discovered.reduce((a, b) => (a.meanNetOfCostsPct >= b.meanNetOfCostsPct ? a : b));
   return { status: best.meanNetOfCostsPct > 0 ? 'supported' : 'below_costs', horizon: best };
 }
 

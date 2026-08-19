@@ -2,7 +2,13 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { CategoryResult, HorizonResult } from '../src/backtesting/event-study.js';
+import {
+  runEventStudy,
+  type CategoryResult,
+  type HorizonResult,
+  type StudyEvent,
+} from '../src/backtesting/event-study.js';
+import type { Bar } from '../src/domain/types.js';
 import {
   EvidenceBook,
   eventTypeForCategory,
@@ -57,6 +63,33 @@ const options = {
   roundTripCostPct: 0.3,
   symbols: 40,
 };
+
+/** Same builders as tests/event-study.test.ts, for the end-to-end veto test. */
+function studyBars(symbol: string, closes: number[], startDay = 1): Bar[] {
+  return closes.map((close, i) => {
+    const timestamp = new Date(Date.UTC(2026, 0, startDay + i)).toISOString();
+    return {
+      symbol,
+      timestamp,
+      open: close,
+      high: close,
+      low: close,
+      close,
+      volume: 1_000_000,
+      interval: '1Day' as const,
+      freshness: {
+        asOf: timestamp,
+        retrievedAt: timestamp,
+        delayClass: 'end_of_day' as const,
+        feed: 'test',
+      },
+    };
+  });
+}
+
+function studyEvent(symbol: string, day: number, category: string): StudyEvent {
+  return { symbol, at: new Date(Date.UTC(2026, 0, day, 21, 0)).toISOString(), category };
+}
 
 describe('mapping a study category to an event type', () => {
   it('reads an 8-K item code through the detector rules', () => {
@@ -147,6 +180,118 @@ describe('summarising a study', () => {
     expect(book.symbols).toBe(40);
     expect(book.benchmark).toBe('SPY');
     expect(book.roundTripCostPct).toBe(0.3);
+  });
+});
+
+describe('refusing and claiming are held to different bars', () => {
+  it('still refuses a category that lost multiplicity survival', () => {
+    // The bug this guards. A veto derived from `survivesMultiplicity` moves
+    // when the family grows, so connecting a new data source could retire a
+    // block on a category measured drifting against a long — the evidence
+    // against it unchanged, the refusal gone.
+    const book = summariseEvidence(
+      [
+        category({
+          horizons: [horizon({ meanAbnormalPct: -1.64, tStat: -2.4, survivesMultiplicity: false })],
+        }),
+      ],
+      options,
+    );
+    expect(book.categories[0]!.status).toBe('adverse');
+  });
+
+  it('will not refuse on a drift that never crossed the nominal bar', () => {
+    // Loosening the veto must not mean abandoning it: a negative mean that
+    // could easily be noise is still nothing.
+    const book = summariseEvidence(
+      [
+        category({
+          horizons: [horizon({ meanAbnormalPct: -1.64, tStat: -0.9, survivesMultiplicity: false })],
+        }),
+      ],
+      options,
+    );
+    expect(book.categories[0]!.status).toBe('inconclusive');
+  });
+
+  it('will not refuse on a sample carried by too few symbols', () => {
+    // One company's bad five years is not a category effect, in either
+    // direction.
+    const book = summariseEvidence(
+      [category({ horizons: [horizon({ meanAbnormalPct: -4, tStat: -6, clusters: 3 })] })],
+      options,
+    );
+    expect(book.categories[0]!.status).toBe('untested');
+  });
+
+  it('still requires multiplicity survival before claiming support', () => {
+    // The strict half is unchanged: the asymmetry is the point.
+    const book = summariseEvidence(
+      [
+        category({
+          horizons: [horizon({ meanAbnormalPct: 2.0, tStat: 2.4, survivesMultiplicity: false })],
+        }),
+      ],
+      options,
+    );
+    expect(book.categories[0]!.status).toBe('inconclusive');
+  });
+
+  it('keeps a real adverse category blocked when the study grows to forty-one tests', () => {
+    // End to end against the real study, mirroring the multiplicity test in
+    // tests/event-study.test.ts: one category with a modest negative drift,
+    // unchanged, measured alone and then among forty quiet ones. Its own
+    // evidence never moves, so its block must not either.
+    const real = Array.from({ length: 12 }, (_, i) => `REAL${i}`);
+    const quiet = Array.from({ length: 12 }, (_, i) => `QUIET${i}`);
+
+    const barsBySymbol = new Map<string, Bar[]>();
+    real.forEach((symbol, s) => {
+      barsBySymbol.set(
+        symbol,
+        studyBars(
+          symbol,
+          // Negative drift, with an aperiodic wobble so the variance is not zero.
+          Array.from({ length: 90 }, (_, i) =>
+            Number((100 * 0.9996 ** i * (1 + 0.02 * Math.sin(i * 1.7 + s))).toFixed(4)),
+          ),
+        ),
+      );
+    });
+    for (const symbol of quiet) {
+      barsBySymbol.set(symbol, studyBars(symbol, Array.from({ length: 90 }, () => 100)));
+    }
+
+    const realEvents = real.flatMap((symbol) =>
+      Array.from({ length: 4 }, (_, i) => studyEvent(symbol, i * 5 + 1, '8-K item 2.02')),
+    );
+    const quietEvents = Array.from({ length: 40 }, (_, c) =>
+      quiet.flatMap((symbol) =>
+        Array.from({ length: 4 }, (_, i) => studyEvent(symbol, i * 5 + 1, `quiet${c}`)),
+      ),
+    ).flat();
+
+    const alone = runEventStudy({ events: realEvents, barsBySymbol, horizons: [5] });
+    const amongMany = runEventStudy({
+      events: [...realEvents, ...quietEvents],
+      barsBySymbol,
+      horizons: [5],
+    });
+
+    const findReal = (rs: typeof alone) => rs.find((r) => r.category === '8-K item 2.02')!;
+    // The evidence itself is identical in both runs — only the company it keeps changed.
+    expect(findReal(alone).horizons[0]!.tStat).toBe(findReal(amongMany).horizons[0]!.tStat);
+    expect(findReal(alone).horizons[0]!.meanAbnormalPct).toBeLessThan(0);
+    expect(findReal(alone).horizons[0]!.survivesMultiplicity).toBe(true);
+    expect(findReal(amongMany).horizons[0]!.survivesMultiplicity).toBe(false);
+
+    // ...and the refusal holds through that, which is the whole point.
+    for (const results of [alone, amongMany]) {
+      const bookFile = summariseEvidence(results, options);
+      const entry = bookFile.categories.find((c) => c.category === '8-K item 2.02')!;
+      expect(entry.status).toBe('adverse');
+      expect(EvidenceBook.fromFile(bookFile).blocks('earnings')).toBeDefined();
+    }
   });
 });
 

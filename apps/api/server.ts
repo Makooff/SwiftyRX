@@ -5,7 +5,7 @@ import { redact } from '../../src/core/redact.js';
 import { metrics } from '../../src/monitoring/metrics.js';
 import { renderDashboard, type DashboardData } from '../dashboard/render.js';
 import type { TradingAgent } from '../worker/agent.js';
-import { buildSnapshot } from '../worker/snapshot.js';
+import { buildSnapshot, unmeasurableFrom } from '../worker/snapshot.js';
 import { assertExposureIsSafe, authorise } from './auth.js';
 
 /**
@@ -94,6 +94,10 @@ function buildDashboardData(agent: TradingAgent, config: AppConfig): DashboardDa
       expiresAt: plan.expiresAt,
     })),
     ...(agent.evidence ? { evidence: agent.evidence.file } : {}),
+    outcomes: agent.getHitRates(),
+    // Not via buildSnapshot: that shells out to git, and this renders on every
+    // dashboard refresh.
+    unmeasurableEventTypes: unmeasurableFrom(agent),
     llmProvider: agent.getLlmProviderId(),
   };
 }
