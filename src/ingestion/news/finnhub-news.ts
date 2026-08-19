@@ -1,5 +1,6 @@
 import type { Clock } from '../../core/clock.js';
 import { systemClock } from '../../core/clock.js';
+import { UpstreamError } from '../../core/errors.js';
 import { createLogger, type Logger } from '../../core/logger.js';
 import type { HealthReport, NormalizedDocument } from '../../domain/types.js';
 import { FINNHUB_NEWS_SOURCE, type FinnhubAdapter } from '../market_data/finnhub.js';
@@ -55,6 +56,17 @@ export class FinnhubNewsSource implements DocumentSource {
   private readonly clock: Clock;
   /** Where the next cycle resumes, so every symbol is reached in turn. */
   private cursor = 0;
+  /**
+   * What the last attempt actually did.
+   *
+   * A key being present is not a key being accepted. `FINNHUB_API_KEY=changeme`
+   * is configured by every test this code can apply to a string, and 401s on
+   * every call — so a probe that only asks "is it non-empty" reports healthy
+   * while nothing works. That is the failure this system exists to make
+   * impossible, so the probe reports what the calls did rather than what the
+   * configuration says.
+   */
+  private lastAttempt?: { symbols: number; failures: number; error?: string; rejected: boolean };
 
   constructor(options: FinnhubNewsOptions) {
     this.adapter = options.adapter;
@@ -84,13 +96,25 @@ export class FinnhubNewsSource implements DocumentSource {
     if (!this.isConfigured()) return [];
 
     const documents: NormalizedDocument[] = [];
-    for (const symbol of this.nextSlice()) {
+    const slice = this.nextSlice();
+    const attempt = { symbols: slice.length, failures: 0, rejected: false } as NonNullable<
+      typeof this.lastAttempt
+    >;
+
+    for (const symbol of slice) {
       try {
         documents.push(...(await this.adapter.fetchCompanyNews(symbol, window)));
       } catch (error) {
         // One symbol failing must not cost the other seven. A rate limit or a
         // delisted ticker is an ordinary event here, not a reason to return
         // nothing and make the cycle look like a quiet news day.
+        attempt.failures += 1;
+        attempt.error = (error as Error).message;
+        // 401 and 403 are not transient and not the symbol's fault: the key is
+        // wrong. Worth separating, because "retry later" is the wrong advice.
+        if (error instanceof UpstreamError && (error.status === 401 || error.status === 403)) {
+          attempt.rejected = true;
+        }
         this.log.warn(
           { symbol, error: (error as Error).message },
           'company news fetch failed for one symbol',
@@ -98,27 +122,56 @@ export class FinnhubNewsSource implements DocumentSource {
       }
     }
 
+    this.lastAttempt = attempt;
     return window.limit ? documents.slice(0, window.limit) : documents;
   }
 
   async health(): Promise<HealthReport> {
     const configured = this.adapter.isConfigured();
-    return {
+    const base = {
       adapter: this.id,
       kind: this.kind,
-      state: configured
-        ? this.symbols.length > 0
-          ? 'healthy'
-          : 'disabled'
-        : 'disabled',
       checkedAt: this.clock.now().toISOString(),
       requiresCredentials: true,
       credentialsPresent: configured,
-      ...(configured
-        ? this.symbols.length === 0
-          ? { detail: 'WATCHLIST is empty, so there is nothing to ask about' }
-          : {}
-        : { detail: 'FINNHUB_API_KEY not set' }),
     };
+
+    // Not configured, and not configurable: nobody asked for this source, so
+    // it is off rather than broken.
+    if (!configured) return { ...base, state: 'disabled', detail: 'FINNHUB_API_KEY not set' };
+    if (this.symbols.length === 0) {
+      return { ...base, state: 'disabled', detail: 'WATCHLIST is empty, so there is nothing to ask about' };
+    }
+
+    const attempt = this.lastAttempt;
+    // Nothing tried yet. Reporting healthy here would be a guess; reporting
+    // unavailable would be a false alarm on every fresh start.
+    if (!attempt || attempt.symbols === 0) {
+      return { ...base, state: 'degraded', detail: 'configured, no fetch attempted yet' };
+    }
+
+    if (attempt.rejected) {
+      return {
+        ...base,
+        state: 'unavailable',
+        detail: 'FINNHUB_API_KEY was rejected (401/403) — the key is present but not valid',
+      };
+    }
+    if (attempt.failures === attempt.symbols) {
+      return {
+        ...base,
+        state: 'unavailable',
+        detail: `every symbol failed last cycle: ${attempt.error ?? 'unknown error'}`,
+      };
+    }
+    if (attempt.failures > 0) {
+      return {
+        ...base,
+        state: 'degraded',
+        detail: `${attempt.failures} of ${attempt.symbols} symbol(s) failed: ${attempt.error ?? ''}`,
+      };
+    }
+
+    return { ...base, state: 'healthy' };
   }
 }

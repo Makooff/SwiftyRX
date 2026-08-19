@@ -156,10 +156,61 @@ describe('when something is missing or broken', () => {
     expect(report.detail).toMatch(/WATCHLIST/);
   });
 
-  it('reports healthy once both are present', async () => {
+  it('does not claim healthy before it has tried anything', async () => {
+    // A key being present is not a key being accepted. Claiming healthy here
+    // would be a guess, and claiming unavailable would be a false alarm on
+    // every fresh start.
     const report = await sourceWith({}).source.health();
+    expect(report.state).toBe('degraded');
+    expect(report.detail).toMatch(/no fetch attempted/);
+  });
+
+  it('reports healthy once a fetch has actually worked', async () => {
+    const { source } = sourceWith({ perCycle: 2 });
+    await source.fetchDocuments();
+    const report = await source.health();
     expect(report.state).toBe('healthy');
     expect(report.credentialsPresent).toBe(true);
+  });
+
+  it('says the key was rejected rather than reporting healthy', async () => {
+    // FINNHUB_API_KEY=changeme passes every test that can be applied to a
+    // string and 401s on every call. A probe that only asks "is it non-empty"
+    // reports healthy while nothing works — which is the exact failure this
+    // system exists to make impossible.
+    const clock = FixedClock.at(NOW);
+    const fake = createFakeFetch([{ match: 'company-news', status: 401, body: { error: 'invalid key' } }]);
+    const source = new FinnhubNewsSource({
+      adapter: new FinnhubAdapter({ apiKey: 'not-a-real-key', clock, fetchImpl: fake.impl }),
+      symbols: ['AAPL', 'MSFT'],
+      symbolsPerCycle: 2,
+      clock,
+    });
+
+    await source.fetchDocuments();
+    const report = await source.health();
+    expect(report.state).toBe('unavailable');
+    expect(report.detail).toMatch(/rejected/);
+  });
+
+  it('reports degraded when only some symbols fail', async () => {
+    // A rate limit on one ticker is not the same as a dead source, and calling
+    // both "unavailable" would train the reader to ignore the word.
+    const clock = FixedClock.at(NOW);
+    const fake = createFakeFetch([
+      { match: 'symbol=MSFT', status: 500, body: { error: 'boom' } },
+      { match: 'company-news', body: [newsItem('OK')] },
+    ]);
+    const source = new FinnhubNewsSource({
+      adapter: new FinnhubAdapter({ apiKey: 'test-key', clock, fetchImpl: fake.impl }),
+      symbols: ['AAPL', 'MSFT'],
+      symbolsPerCycle: 2,
+      clock,
+    });
+
+    await source.fetchDocuments();
+    const report = await source.health();
+    expect(report.state).toBe('degraded');
   });
 
   it('never leaks the key into a health report', async () => {
