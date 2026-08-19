@@ -27,6 +27,16 @@ export interface PortfolioOptions {
   initialCash: number;
   currency?: string;
   clock?: Clock;
+  /**
+   * Resolves the correlated-exposure group for a symbol, for the snapshot the
+   * Risk Engine reads.
+   *
+   * Applied on read rather than stored on the position, because the group is
+   * derived from an estimate that can be recomputed — storing it would leave
+   * positions opened before a correlation run permanently ungrouped, which is
+   * precisely the state where the exposure limit does nothing.
+   */
+  correlationGroupFor?: (symbol: string) => string | undefined;
 }
 
 /**
@@ -63,6 +73,7 @@ export class Portfolio {
   private readonly closedTrades: ClosedTrade[] = [];
   private readonly marks = new Map<string, number>();
   private readonly clock: Clock;
+  private readonly correlationGroupFor: ((symbol: string) => string | undefined) | undefined;
 
   private peak: number;
   private maxDrawdownPct = 0;
@@ -75,6 +86,7 @@ export class Portfolio {
 
   constructor(options: PortfolioOptions) {
     this.clock = options.clock ?? systemClock;
+    this.correlationGroupFor = options.correlationGroupFor;
     this.currency = options.currency ?? 'EUR';
     this.initialCash = options.initialCash;
     this.cash = options.initialCash;
@@ -267,7 +279,10 @@ export class Portfolio {
    * deciding whether the state belongs to this configuration at all — see
    * `AgentStateStore`, which refuses a mismatch rather than reconciling it.
    */
-  static restore(state: PortfolioState, options: { clock?: Clock } = {}): Portfolio {
+  static restore(
+    state: PortfolioState,
+    options: { clock?: Clock; correlationGroupFor?: (symbol: string) => string | undefined } = {},
+  ): Portfolio {
     if (state.version !== 1) {
       throw new Error(`Unsupported portfolio state version: ${String(state.version)}`);
     }
@@ -276,6 +291,7 @@ export class Portfolio {
       initialCash: state.initialCash,
       currency: state.currency,
       ...(options.clock ? { clock: options.clock } : {}),
+      ...(options.correlationGroupFor ? { correlationGroupFor: options.correlationGroupFor } : {}),
     });
 
     portfolio.cash = state.cash;
@@ -300,7 +316,13 @@ export class Portfolio {
     return {
       cash: this.cash,
       currency: this.currency,
-      positions: this.openPositions,
+      // Groups are attached here, on the way to the engine, so the exposure
+      // limit sees them for every held position including ones restored from a
+      // state file written before any correlation run existed.
+      positions: this.openPositions.map((position) => {
+        const group = this.correlationGroupFor?.(position.symbol);
+        return group ? { ...position, correlationGroup: group } : position;
+      }),
       totalValue: this.totalValue,
       dayStartValue: this.dayStart,
       peakValue: Number(this.peak.toFixed(2)),

@@ -66,6 +66,15 @@ export interface AgentSnapshot {
    * never have an opinion on them however they perform.
    */
   unmeasurableEventTypes: Array<{ type: string; recentEvents: number }>;
+  /** Whether the correlated-exposure limit has groups to apply to at all. */
+  correlation: {
+    source: 'estimated' | 'sector_map';
+    generatedAt?: string;
+    windowDays?: number;
+    symbols?: number;
+    /** Held positions the limit currently cannot constrain. */
+    ungroupedPositions: string[];
+  };
 }
 
 function gitInfo(): GitInfo {
@@ -144,6 +153,19 @@ export function buildSnapshot(agent: TradingAgent, config: AppConfig): AgentSnap
     },
     outcomes: agent.getHitRates(),
     unmeasurableEventTypes: unmeasurableFrom(agent),
+    correlation: {
+      source: agent.correlationSource(),
+      ...(agent.correlations
+        ? {
+            generatedAt: agent.correlations.file.generatedAt,
+            windowDays: agent.correlations.file.windowDays,
+            symbols: agent.correlations.symbolCount,
+          }
+        : {}),
+      ungroupedPositions: portfolio.openPositions
+        .filter((position) => agent.correlationGroupFor(position.symbol) === undefined)
+        .map((position) => position.symbol),
+    },
     ...(agent.evidence
       ? {
           evidence: {
@@ -250,6 +272,24 @@ export function formatSnapshotText(snapshot: AgentSnapshot): string {
     for (const { type, recentEvents } of snapshot.unmeasurableEventTypes) {
       lines.push(`  ${type.padEnd(22)} ${recentEvents} recent event(s)`);
     }
+  }
+
+  section('Correlated-exposure groups');
+  if (snapshot.correlation.source === 'estimated') {
+    lines.push(
+      `  estimated over ${snapshot.correlation.windowDays}d across ${snapshot.correlation.symbols} symbol(s), ` +
+        `generated ${snapshot.correlation.generatedAt?.slice(0, 10)}`,
+    );
+  } else {
+    lines.push('  no estimate on record — falling back to the curated sector map (12 companies).');
+    lines.push('  Run: npm run correlations -- --out');
+  }
+  if (snapshot.correlation.ungroupedPositions.length > 0) {
+    // A held position with no group is one the limit cannot see, so the cap is
+    // not being applied to it whatever the configured percentage says.
+    lines.push(
+      `  !! NOT constrained by the limit (no group): ${snapshot.correlation.ungroupedPositions.join(', ')}`,
+    );
   }
 
   section('Evidence ledger');

@@ -226,6 +226,36 @@ Sources: [Messages API](https://docs.claude.com/en/api/messages),
 
 ---
 
+## Wanted but NOT verified — SEC older-filing shards
+
+**Status: unverified. Not implemented. Do not implement from this section.**
+
+`SecEdgarAdapter` already reports (`shallow[]`, `sec-edgar.ts:219-224`) when EDGAR's
+recent-filings index does not reach back as far as the study asked for. Large caps file
+enough that a five-year window is not covered by the recent index alone, which caps the
+depth of any study over them.
+
+The submissions endpoint is understood to carry, alongside `filings.recent`, a
+`filings.files` array pointing at additional JSON files holding older filings. That is the
+mechanism a backfill would use.
+
+It is recorded here as **unverified** because it could not be checked against the source:
+
+- `https://www.sec.gov/search-filings/edgar-application-programming-interfaces` — blocked
+  by the network egress proxy from this environment.
+- `https://data.sec.gov/submissions/CIK0000320193.json` — same, `CONNECT tunnel failed,
+  response 403`, so no live payload could be inspected either.
+- Secondary write-ups agree on the concept, but none is the SEC, and the exact field names
+  (`name`, `filingFrom`, `filingTo`, `filingCount`) and the URL the shard files are served
+  from are precisely the details a secondary source is most likely to paraphrase wrongly.
+
+`SubmissionsResponse` in `sec-edgar.ts` therefore still types only `filings.recent`. Before
+implementing a backfill: fetch a real submissions payload for a company with a long filing
+history from a machine with network access, record it as a fixture in `tests/`, and replace
+this section with the observed shape. Guessing the field names would produce an adapter that
+silently returns nothing and a study that quietly stays shallow — which is the failure mode
+this project has already corrected once, in the per-ticker filing budget.
+
 ## Deliberately not used
 
 - **Yahoo Finance** — the widely used endpoints are undocumented and unsanctioned. Using
