@@ -66,6 +66,12 @@ export interface AgentSnapshot {
    * never have an opinion on them however they perform.
    */
   unmeasurableEventTypes: Array<{ type: string; recentEvents: number }>;
+  /** Sources watched but not traded on, and whether each can be promoted yet. */
+  observation: {
+    sources: string[];
+    /** Event types seen from those sources that no study has measured yet. */
+    unmeasuredTypes: string[];
+  };
   /** Whether the correlated-exposure limit has groups to apply to at all. */
   correlation: {
     source: 'estimated' | 'sector_map';
@@ -153,6 +159,21 @@ export function buildSnapshot(agent: TradingAgent, config: AppConfig): AgentSnap
     },
     outcomes: agent.getHitRates(),
     unmeasurableEventTypes: unmeasurableFrom(agent),
+    observation: {
+      sources: [...agent.observationOnlySources].sort(),
+      unmeasuredTypes: [
+        ...new Set(
+          agent
+            .getEvents()
+            .filter((event) =>
+              event.sources.length > 0 &&
+              event.sources.every((source) => agent.observationOnlySources.has(source)) &&
+              agent.evidence?.forEventType(event.type)?.status === undefined,
+            )
+            .map((event) => event.type),
+        ),
+      ].sort(),
+    },
     correlation: {
       source: agent.correlationSource(),
       ...(agent.correlations
@@ -271,6 +292,16 @@ export function formatSnapshotText(snapshot: AgentSnapshot): string {
     lines.push('  so a study result could never block them however they perform.');
     for (const { type, recentEvents } of snapshot.unmeasurableEventTypes) {
       lines.push(`  ${type.padEnd(22)} ${recentEvents} recent event(s)`);
+    }
+  }
+
+  if (snapshot.observation.sources.length > 0) {
+    section('Sources in observation');
+    lines.push(`  watched but not traded on: ${snapshot.observation.sources.join(', ')}`);
+    lines.push('  Their events are analysed and journalled; no order is placed until the');
+    lines.push('  study measures the category. Promotion is automatic.');
+    if (snapshot.observation.unmeasuredTypes.length > 0) {
+      lines.push(`  still unmeasured: ${snapshot.observation.unmeasuredTypes.join(', ')}`);
     }
   }
 
