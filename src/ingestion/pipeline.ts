@@ -11,6 +11,7 @@ import { FredAdapter } from './macro/fred.js';
 import { AlpacaMarketDataAdapter } from './market_data/alpaca.js';
 import { AlphaVantageAdapter } from './market_data/alpha-vantage.js';
 import { FinnhubAdapter } from './market_data/finnhub.js';
+import { FinnhubNewsSource } from './news/finnhub-news.js';
 import { FixtureMarketDataAdapter } from './market_data/fixture.js';
 import { MarketDataService } from './market_data/index.js';
 import { RssAdapter } from './news/rss.js';
@@ -110,6 +111,25 @@ export function buildIngestionStack(config: AppConfig, options: BuildOptions = {
   if (fred.isConfigured()) macroSources.push(fred);
 
   // --- Market data --------------------------------------------------------
+  // One instance, shared with the company-news source below. Two would mean two
+  // token buckets against one 60-calls-a-minute account, which is the same as
+  // having none.
+  const finnhub = new FinnhubAdapter({
+    ...(config.FINNHUB_API_KEY ? { apiKey: config.FINNHUB_API_KEY } : {}),
+    ...shared,
+  });
+
+  // Company news: the only configured source that produces company-specific
+  // events rather than macro. Everything else running today publishes rate
+  // decisions and statistics, which cannot carry a company catalyst.
+  const finnhubNews = new FinnhubNewsSource({
+    adapter: finnhub,
+    symbols: config.WATCHLIST,
+    clock,
+    logger: log,
+  });
+  if (finnhubNews.isConfigured()) documentSources.push(finnhubNews);
+
   // Ordered by priority: real-time feed first, EOD fallbacks after.
   const marketProviders: MarketDataSource[] = [
     new AlpacaMarketDataAdapter({
@@ -118,10 +138,7 @@ export function buildIngestionStack(config: AppConfig, options: BuildOptions = {
       feed: config.ALPACA_DATA_FEED,
       ...shared,
     }),
-    new FinnhubAdapter({
-      ...(config.FINNHUB_API_KEY ? { apiKey: config.FINNHUB_API_KEY } : {}),
-      ...shared,
-    }),
+    finnhub,
     new AlphaVantageAdapter({
       ...(config.ALPHA_VANTAGE_API_KEY ? { apiKey: config.ALPHA_VANTAGE_API_KEY } : {}),
       ...shared,
