@@ -28,9 +28,9 @@ The dashboard shows a live portfolio, its open positions and every signal. It
 is read-only — there is no endpoint that can place or cancel an order — but
 that is still not something to leave open to the internet.
 
-Two ways to reach it, in order of preference:
+Three ways to reach it:
 
-### 1. SSH tunnel (recommended, nothing exposed)
+### 1. SSH tunnel (nothing exposed, needs your laptop)
 
 Leave the server bound to loopback and forward the port over SSH:
 
@@ -39,7 +39,8 @@ ssh -N -L 3000:127.0.0.1:3000 you@your-server
 ```
 
 Then open `http://127.0.0.1:3000` on your own machine. Nothing is published,
-and there is no password to leak.
+and there is no password to leak. The trade-off is that the link only exists
+while that SSH session does — for a permanent one, see §3.
 
 ### 2. Public with a password
 
@@ -64,6 +65,51 @@ dashboard.yourdomain.com {
 ```
 
 Caddy obtains and renews the certificate itself.
+
+### 3. A permanent link, no domain and no open port
+
+What you want if the answer to "is it working?" should be a bookmark on your
+phone. A tunnel dials **out** from the server, so nothing is listening on the
+public internet and no firewall rule changes.
+
+[Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel) gives a
+stable HTTPS hostname on the free tier, without owning a domain:
+
+```bash
+# once, on the server
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+# Funnel must also be allowed in the tailnet policy, and MagicDNS + HTTPS
+# certificates enabled in the admin console — both are one toggle each.
+
+# then, per port — --bg keeps it running after you close the SSH session
+sudo tailscale funnel --bg 3000
+```
+
+It prints the URL, of the form `https://<machine>.<tailnet>.ts.net`. That
+hostname does not change between restarts, which is the whole point.
+
+Cloudflare's quick tunnel is the throwaway equivalent — one command, no account:
+
+```bash
+cloudflared tunnel --url http://localhost:3000
+```
+
+It prints a random `*.trycloudflare.com` URL that **changes every time you
+restart it**, so it is fine for showing someone the page once and wrong as a
+bookmark. A Cloudflare hostname that survives a restart needs a named tunnel,
+which needs a domain on Cloudflare (`cloudflared tunnel route dns …`).
+
+**Set `DASHBOARD_PASSWORD` before you do any of this.** Leave `DASHBOARD_HOST`
+at `127.0.0.1` — the tunnel connects to loopback, so the startup gate in §2
+never fires, and without the password the dashboard would be published to
+anyone with the URL. The server refuses that: a request carrying a forwarding
+header, or a `Host` that is not this machine, gets a 403 explaining what to set
+when no password is configured. That check stops the accident, not a targeted
+attacker — the password is the actual control.
+
+Both tunnels terminate TLS for you, so Basic auth is not travelling in the
+clear the way it would over plain HTTP on port 3000.
 
 ---
 

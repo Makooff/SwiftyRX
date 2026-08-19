@@ -6,7 +6,7 @@ import { metrics } from '../../src/monitoring/metrics.js';
 import { renderDashboard, type DashboardData } from '../dashboard/render.js';
 import type { TradingAgent } from '../worker/agent.js';
 import { buildSnapshot, unmeasurableFrom } from '../worker/snapshot.js';
-import { assertExposureIsSafe, authorise } from './auth.js';
+import { assertExposureIsSafe, authorise, refuseUnprotectedExposure } from './auth.js';
 
 /**
  * Dashboard and monitoring API.
@@ -108,6 +108,12 @@ export function createApiServer(options: ApiServerOptions): Server {
 
   return createServer((req, res) => {
     // Before anything is read, rendered or serialised.
+    //
+    // Two gates, because they answer different questions. The first: is this
+    // request reaching a passwordless dashboard from off this machine — which
+    // a loopback bind behind a tunnel cannot tell you at startup. The second:
+    // is whoever is asking allowed to.
+    if (!refuseUnprotectedExposure(req, res, config.DASHBOARD_PASSWORD)) return;
     if (!authorise(req, res, { user: config.DASHBOARD_USER, password: config.DASHBOARD_PASSWORD })) {
       return;
     }
