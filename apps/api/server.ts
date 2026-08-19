@@ -50,6 +50,16 @@ function settingsRows(config: AppConfig): DashboardData['settings'] {
     { label: 'Loss cooldown', value: `${config.CONSECUTIVE_LOSS_COOLDOWN_MINUTES} min`, note: 'after consecutive losses' },
     { label: 'Quote staleness', value: `${config.MAX_QUOTE_STALENESS_SECONDS}s`, note: 'past this: do not trade' },
     { label: 'Short selling', value: config.ALLOW_SHORT_SELLING ? 'allowed' : 'off' },
+    {
+      label: 'Crypto',
+      value: config.ALLOW_CRYPTO ? 'allowed' : 'off',
+      note: 'refused at the risk engine, in every mode',
+    },
+    {
+      label: 'Options / derivatives',
+      value: config.ALLOW_OPTIONS && config.ALLOW_DERIVATIVES ? 'allowed' : 'off',
+      note: 'an option needs both flags',
+    },
     { label: 'Leverage', value: `${config.MAX_LEVERAGE}x` },
     { label: 'Manual approval', value: config.REQUIRE_APPROVAL ? 'required' : 'off', note: config.REQUIRE_APPROVAL ? 'no answer = no trade' : '' },
   ];

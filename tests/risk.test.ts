@@ -305,6 +305,44 @@ describe('RiskEngine — per-order rules', () => {
   });
 });
 
+describe('RiskEngine — instrument permissions', () => {
+  it('refuses a memecoin pair with the default configuration', () => {
+    // The default .env promises crypto is off. Before the gate existed the
+    // promise was decorative: this order was sized and approved.
+    const engine = new RiskEngine({ config: config(), clock });
+    const decision = engine.evaluate(request({ symbol: 'DOGE/USD' }), portfolio());
+    expect(decision.verdict).toBe('rejected');
+    expect(decision.rejections.map((r) => r.rule)).toContain('instrument_permitted');
+  });
+
+  it('enforces it in paper mode, not only live', () => {
+    // Paper results that include trades the real configuration forbids measure
+    // a system nobody is allowed to run.
+    const engine = new RiskEngine({ config: config({ MODE: 'paper' }), clock });
+    expect(engine.evaluate(request({ symbol: 'PEPE/USD' }), portfolio()).verdict).toBe('rejected');
+  });
+
+  it('lets the pair through once ALLOW_CRYPTO is set', () => {
+    const engine = new RiskEngine({ config: config({ ALLOW_CRYPTO: 'true' }), clock });
+    const decision = engine.evaluate(request({ symbol: 'DOGE/USD' }), portfolio());
+    expect(decision.rejections.map((r) => r.rule)).not.toContain('instrument_permitted');
+  });
+
+  it('changes nothing for an equity', () => {
+    // A safety fix that quietly stops the existing watchlist trading would be
+    // a regression wearing a badge.
+    const engine = new RiskEngine({ config: config(), clock });
+    expect(engine.evaluate(request({ symbol: 'AAPL' }), portfolio()).verdict).toBe('approved');
+  });
+
+  it('records the check even when it passes', () => {
+    // A gate that only appears in the log when it fires cannot be audited.
+    const engine = new RiskEngine({ config: config(), clock });
+    const decision = engine.evaluate(request(), portfolio());
+    expect(decision.checks.map((c) => c.rule)).toContain('instrument_permitted');
+  });
+});
+
 describe('live trading gate', () => {
   it('blocks live trading under a paper configuration', () => {
     expect(() => assertLiveTradingAllowed(config())).toThrow(LiveTradingBlockedError);
