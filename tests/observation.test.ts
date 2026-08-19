@@ -16,6 +16,8 @@ import type { DocumentSource } from '../src/ingestion/types.js';
 import type { LLMProvider } from '../src/intelligence/llm/types.js';
 import { EvidenceBook } from '../src/strategy/evidence.js';
 import { observationVerdict } from '../src/strategy/observation.js';
+import { evaluateAnalysisGate } from '../src/intelligence/pipeline.js';
+import type { MarketEvent } from '../src/intelligence/types.js';
 
 /**
  * Observation mode.
@@ -252,5 +254,129 @@ describe('an agent watching a source end to end', () => {
     const { agent } = await agentWith('outlet_a');
     await agent.runCycle();
     expect(agent.getState().ordersPlaced).toBe(1);
+  });
+});
+
+describe('letting a watched source reach the analysis it is watched for', () => {
+  /**
+   * The defect this closes: observation was gated at the Risk Engine, which is
+   * two steps after the analysis gate. A social-only event is capped at 0.35
+   * confidence by the verifier and the floor is 0.50, so a watched X account
+   * was dropped before any LLM call — never analysed, never journalled, never
+   * scored, and therefore unable to earn the automatic promotion the feature
+   * promises. Observation of exactly the sources most worth observing did
+   * nothing at all.
+   */
+
+  const WATCHED = new Set(['x:@influencer']);
+
+  function socialEvent(overrides: Partial<MarketEvent> = {}): MarketEvent {
+    return {
+      id: 'e1',
+      type: 'other',
+      headline: 'A coin is going to the moon',
+      summary: '',
+      firstSeenAt: '2026-08-19T11:00:00Z',
+      lastUpdatedAt: '2026-08-19T11:00:00Z',
+      entities: [],
+      tickers: ['DOGE/USD'],
+      jurisdictions: [],
+      documentIds: ['d1'],
+      sources: ['x:@influencer'],
+      links: [],
+      classification: { type: 'other', confidence: 0.5, matchedRules: [] },
+      materiality: 0.6,
+      verification: {
+        status: 'unverified',
+        confidence: 0.2,
+        distinctSources: 1,
+        independentReports: 1,
+        authoritativeSources: [],
+        contradictions: [],
+        reasons: [],
+      },
+      ...overrides,
+    } as MarketEvent;
+  }
+
+  it('drops a low-confidence event when nothing is being watched', () => {
+    // The unchanged default, and the behaviour every existing setup keeps.
+    const result = evaluateAnalysisGate([socialEvent()]);
+    expect(result.kept).toHaveLength(0);
+    expect(result.droppedByReason).toMatchObject({ 'confidence below 0.5': 1 });
+  });
+
+  it('analyses it when its source is under observation', () => {
+    const result = evaluateAnalysisGate([socialEvent()], {
+      observationSources: WATCHED,
+      observationBudget: 3,
+    });
+    expect(result.kept).toHaveLength(1);
+  });
+
+  it('spends a bounded budget and says so when it runs out', () => {
+    // Every one of these is a paid LLM call on information nobody has shown to
+    // be worth anything. A switch would be an unbounded bill.
+    const events = [socialEvent({ id: 'a' }), socialEvent({ id: 'b' }), socialEvent({ id: 'c' })];
+    const result = evaluateAnalysisGate(events, {
+      observationSources: WATCHED,
+      observationBudget: 2,
+    });
+    expect(result.kept).toHaveLength(2);
+    expect(result.droppedByReason).toMatchObject({ 'observation budget spent this cycle': 1 });
+  });
+
+  it('does nothing for a source outside the list', () => {
+    const other = socialEvent({ sources: ['x:@someone_else'] });
+    const result = evaluateAnalysisGate([other], {
+      observationSources: WATCHED,
+      observationBudget: 3,
+    });
+    expect(result.kept).toHaveLength(0);
+  });
+
+  it('still refuses a contradicted event, watched or not', () => {
+    // Watching a source is not a reason to spend a call interpreting something
+    // we have positive evidence is false.
+    const contradicted = socialEvent({
+      verification: { ...socialEvent().verification, status: 'contradicted' },
+    });
+    const result = evaluateAnalysisGate([contradicted], {
+      observationSources: WATCHED,
+      observationBudget: 3,
+    });
+    expect(result.kept).toHaveLength(0);
+    expect(result.droppedByReason).toMatchObject({ contradicted: 1 });
+  });
+
+  it('still refuses an unclassified event, watched or not', () => {
+    // Unclassified is not a judgement about the source at all.
+    const result = evaluateAnalysisGate([socialEvent({ type: 'unclassified' })], {
+      observationSources: WATCHED,
+      observationBudget: 3,
+    });
+    expect(result.kept).toHaveLength(0);
+    expect(result.droppedByReason).toMatchObject({ unclassified: 1 });
+  });
+
+  it('still refuses an immaterial event, watched or not', () => {
+    const result = evaluateAnalysisGate([socialEvent({ materiality: 0.1 })], {
+      observationSources: WATCHED,
+      observationBudget: 3,
+    });
+    expect(result.kept).toHaveLength(0);
+  });
+
+  it('does not spend budget on an event that would have passed anyway', () => {
+    // A corroborated event clears the floor on its own; charging it to the
+    // observation budget would starve the ones that actually need it.
+    const confident = socialEvent({
+      verification: { ...socialEvent().verification, confidence: 0.8 },
+    });
+    const result = evaluateAnalysisGate([confident, socialEvent({ id: 'b' })], {
+      observationSources: WATCHED,
+      observationBudget: 1,
+    });
+    expect(result.kept).toHaveLength(2);
   });
 });
