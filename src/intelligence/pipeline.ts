@@ -6,7 +6,7 @@ import { Metrics, metrics as globalMetrics } from '../monitoring/metrics.js';
 import { materialityOf } from './event_detector/classifier.js';
 import { clusterClassification, clusterDocuments, type ClusteringOptions } from './event_detector/clustering.js';
 import type { EventStore } from './event-store.js';
-import type { EventCluster, MarketEvent } from './types.js';
+import type { EventCluster, EventLink, MarketEvent } from './types.js';
 import { measureMarketReaction } from './verification/market-reaction.js';
 import { verifyCluster } from './verification/verifier.js';
 
@@ -113,6 +113,7 @@ export async function detectEvents(
       jurisdictions: cluster.jurisdictions,
       documentIds: cluster.documents.map((doc) => doc.id),
       sources: [...new Set(cluster.documents.map((doc) => doc.source))],
+      links: linksFor(cluster.documents),
       classification,
       materiality,
       verification,
@@ -156,6 +157,35 @@ export async function detectEvents(
       durationMs: clock.nowMs() - startedAt,
     },
   };
+}
+
+/**
+ * The documents behind an event, as openable links.
+ *
+ * Deduplicated by URL and capped: a cluster of syndications of one story is
+ * one story, and a list of forty links would claim otherwise. Documents whose
+ * source gave no URL are skipped rather than rendered as dead entries — an
+ * event with no readable source should look like it has none.
+ */
+const MAX_LINKS = 6;
+
+export function linksFor(documents: NormalizedDocument[]): EventLink[] {
+  const seen = new Set<string>();
+  const links: EventLink[] = [];
+
+  for (const doc of documents) {
+    if (!doc.url || seen.has(doc.url)) continue;
+    seen.add(doc.url);
+    links.push({
+      source: doc.source,
+      title: doc.title,
+      url: doc.url,
+      publishedAt: doc.published_at,
+    });
+    if (links.length >= MAX_LINKS) break;
+  }
+
+  return links;
 }
 
 export interface AnalysisGateResult {

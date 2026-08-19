@@ -88,6 +88,25 @@ function escapeHtml(value: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
+/**
+ * A URL safe to put in an href.
+ *
+ * These come from RSS feeds and provider payloads — text we did not write. A
+ * `javascript:` or `data:` URL in a feed item would otherwise become a live
+ * script the moment someone clicks a headline on their own dashboard. Only
+ * http and https survive; anything else renders as unlinked text.
+ */
+function safeHref(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+    return escapeHtml(parsed.toString());
+  } catch {
+    // Not a URL at all. Nothing to link to.
+    return undefined;
+  }
+}
+
 function pnlClass(value: number): string {
   return value > 0 ? 'pos' : value < 0 ? 'neg' : '';
 }
@@ -288,6 +307,31 @@ summary { cursor: pointer; color: var(--accent); font-size: var(--fs-sm); }
 .factors { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s2); }
 .chip { background: #1d232b; border: 1px solid var(--border); border-radius: var(--r1);
   padding: var(--s1) var(--s2); font-size: 11px; }
+/* Event list. One card per event, stacking naturally at any width — the
+   alternative was a five-column table whose rightmost column, the link out to
+   the source, is the first thing a phone hides. */
+.events { display: flex; flex-direction: column; gap: var(--s4); }
+.event { border: 1px solid var(--border); border-radius: var(--r1); padding: var(--s3) var(--s4); }
+.event-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
+  font-size: var(--fs-xs); }
+/* The category is the field the evidence gate keys on, so it reads as a label
+   and not as decoration. Colour stays reserved for the verification state,
+   which is the part that changes a decision. */
+.cat { background: #1d232b; border: 1px solid var(--border); border-radius: var(--pill);
+  padding: 2px var(--s2); font-weight: 600; letter-spacing: .02em; }
+.tick { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
+.event-head { margin: var(--s2) 0 0; font-size: var(--fs-base); line-height: 1.45; }
+.event-links { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+/* 44px tall because a link you open on a phone is a tap target, not a word. */
+.src { display: inline-flex; align-items: center; min-height: var(--tap);
+  padding: 0 var(--s3); border: 1px solid var(--border); border-radius: var(--r1);
+  color: var(--accent); text-decoration: none; font-size: var(--fs-sm);
+  transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              color 160ms cubic-bezier(0.16, 1, 0.3, 1); }
+.src:hover { border-color: var(--accent); }
+.src:active { transform: scale(0.97); }
+.src-dead { display: inline-flex; align-items: center; min-height: var(--tap);
+  padding: 0 var(--s3); color: var(--muted); font-size: var(--fs-sm); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 .dot.healthy { background: var(--pos); } .dot.degraded { background: var(--warn); }
 .dot.unavailable { background: var(--neg); } .dot.disabled { background: #4a5158; }
@@ -394,21 +438,46 @@ export function renderDashboard(data: DashboardData): string {
           .join('')
       : '<tr><td colspan="6" class="empty">No signals yet</td></tr>';
 
-  const eventRows =
+  // Cards rather than a table row. Five columns of event metadata force a
+  // phone into horizontal scroll, and the one column that matters — the link
+  // out to the thing itself — is the one that falls off the right edge.
+  const eventCards =
     data.events.length > 0
       ? data.events
-          .slice(0, 15)
-          .map(
-            (event) => `<tr>
-        <td>${escapeHtml(event.type)}</td>
-        <td>${escapeHtml(event.headline.slice(0, 80))}</td>
-        <td>${event.materiality.toFixed(2)}</td>
-        <td class="${event.verification.status === 'contradicted' ? 'neg' : event.verification.status === 'officially_confirmed' ? 'pos' : 'muted'}">${escapeHtml(event.verification.status)}</td>
-        <td class="mono">${escapeHtml(event.tickers.join(', ') || '—')}</td>
-      </tr>`,
-          )
+          .slice(0, 20)
+          .map((event) => {
+            const verificationClass =
+              event.verification.status === 'contradicted'
+                ? 'neg'
+                : event.verification.status === 'officially_confirmed'
+                  ? 'pos'
+                  : 'muted';
+
+            const links = event.links
+              .map((link) => {
+                const href = safeHref(link.url);
+                // No href means the source gave us nothing openable. Say the
+                // source name plainly rather than render a dead link.
+                if (!href) return `<span class="src-dead">${escapeHtml(link.source)}</span>`;
+                return `<a class="src" href="${href}" target="_blank" rel="noopener noreferrer"
+                  title="${escapeHtml(link.title)}">${escapeHtml(link.source)}<span aria-hidden="true"> ↗</span></a>`;
+              })
+              .join('');
+
+            return `<article class="event">
+      <div class="event-meta">
+        <span class="cat">${escapeHtml(event.type)}</span>
+        ${event.tickers.length > 0 ? `<span class="tick">${escapeHtml(event.tickers.join(' '))}</span>` : ''}
+        <span class="${verificationClass}">${escapeHtml(event.verification.status.replace(/_/g, ' '))}</span>
+        <span class="muted">materiality ${event.materiality.toFixed(2)}</span>
+        <span class="muted">${escapeHtml(event.firstSeenAt.slice(0, 16).replace('T', ' '))}</span>
+      </div>
+      <p class="event-head">${escapeHtml(event.headline)}</p>
+      ${links ? `<div class="event-links">${links}</div>` : '<p class="note">No source link — this feed publishes none.</p>'}
+    </article>`;
+          })
           .join('')
-      : '<tr><td colspan="5" class="empty">No events detected yet</td></tr>';
+      : '<div class="empty">No events detected yet.</div>';
 
   const orderRows =
     data.orders.length > 0
@@ -619,24 +688,20 @@ export function renderDashboard(data: DashboardData): string {
     </table></div>
   </section>
 
+  <section>
+    <h2>Events detected</h2>
+    <div class="events">${eventCards}</div>
+    <p class="note">Every event links back to the document it came from. The
+      category is what the evidence gate keys on — a category no study measures
+      cannot be blocked by one, however it performs.</p>
+  </section>
+
   ${foldable(
-    'Events and orders',
-    `<div class="grid">
-      <div>
-        <h2>Events</h2>
-        <div class="scroll"><table>
-          <thead><tr><th>Type</th><th>Headline</th><th>Materiality</th><th>Verification</th><th>Tickers</th></tr></thead>
-          <tbody>${eventRows}</tbody>
-        </table></div>
-      </div>
-      <div>
-        <h2>Orders</h2>
-        <div class="scroll"><table>
-          <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill</th><th>Status</th><th>Costs</th></tr></thead>
-          <tbody>${orderRows}</tbody>
-        </table></div>
-      </div>
-    </div>`,
+    'Orders',
+    `<div class="scroll"><table>
+      <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill</th><th>Status</th><th>Costs</th></tr></thead>
+      <tbody>${orderRows}</tbody>
+    </table></div>`,
   )}
 
   ${foldable(

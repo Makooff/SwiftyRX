@@ -38,6 +38,7 @@ function event(overrides: Partial<MarketEvent> = {}): MarketEvent {
     entities: [],
     tickers: ['AAPL'],
     jurisdictions: ['US'],
+    links: [],
     documentIds: ['d1'],
     sources: ['sec_edgar'],
     classification: { type: 'earnings', confidence: 0.9, matched: [] },

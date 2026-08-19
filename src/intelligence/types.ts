@@ -125,6 +125,14 @@ export interface VerificationAssessment {
   reasons: string[];
 }
 
+/** A document behind an event, as something a person can open. */
+export interface EventLink {
+  source: string;
+  title: string;
+  url: string;
+  publishedAt: string | null;
+}
+
 export interface MarketEvent {
   id: string;
   type: EventType;
@@ -139,6 +147,18 @@ export interface MarketEvent {
   jurisdictions: string[];
   documentIds: string[];
   sources: string[];
+  /**
+   * Where to read the thing itself.
+   *
+   * The event is our summary of a cluster of documents; these are the
+   * documents. Without them the dashboard can state that a filing was
+   * detected and offer no way to check whether the reading was right, which
+   * makes every judgement here unfalsifiable from the outside.
+   *
+   * One entry per distinct URL, capped — a cluster of forty syndications of
+   * one story is one story, and storing forty links would say otherwise.
+   */
+  links: EventLink[];
   classification: Classification;
   /** Prior importance in [0,1], before any claim-level verification. */
   materiality: number;
