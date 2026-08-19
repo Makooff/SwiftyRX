@@ -207,12 +207,50 @@ export interface AnalysisGateResult {
  * are two implementations of one rule, and two implementations disagree
  * eventually.
  */
+/**
+ * Is every source behind this event one we are deliberately watching?
+ *
+ * Same rule as the observation gate at the risk engine: one source outside the
+ * list means the event stands on that source's own footing.
+ */
+function allSourcesObserved(event: MarketEvent, observed: ReadonlySet<string>): boolean {
+  return (
+    observed.size > 0 && event.sources.length > 0 && event.sources.every((s) => observed.has(s))
+  );
+}
+
 export function evaluateAnalysisGate(
   events: MarketEvent[],
-  options: { minMateriality?: number; minConfidence?: number } = {},
+  options: {
+    minMateriality?: number;
+    minConfidence?: number;
+    /**
+     * Sources under observation, and how many of their events may be analysed
+     * this cycle.
+     *
+     * The confidence floor exists to avoid paying an LLM call to interpret
+     * something we do not believe. For a source placed in observation that is
+     * exactly backwards: whether to believe it is the open question, and the
+     * only way to answer it is to record the decisions it would have driven
+     * and score them a horizon later.
+     *
+     * A social-only event is capped at 0.35 confidence by the verifier and the
+     * floor is 0.50, so before this existed a watched X account was dropped
+     * here — two steps before the risk-engine gate that was supposed to hold
+     * it back. Its events were never analysed, never journalled, never scored,
+     * and so could never earn the automatic promotion the feature promises.
+     *
+     * Bounded, because every one of these is a paid LLM call on information
+     * nobody has yet shown to be worth anything.
+     */
+    observationSources?: ReadonlySet<string>;
+    observationBudget?: number;
+  } = {},
 ): AnalysisGateResult {
   const minMateriality = options.minMateriality ?? 0.4;
   const minConfidence = options.minConfidence ?? 0.5;
+  const observed = options.observationSources ?? new Set<string>();
+  let observationBudget = options.observationBudget ?? 0;
 
   const kept: MarketEvent[] = [];
   const droppedByReason: Record<string, number> = {};
@@ -228,7 +266,18 @@ export function evaluateAnalysisGate(
     } else if (event.materiality < minMateriality) {
       drop(`materiality below ${minMateriality}`);
     } else if (event.verification.confidence < minConfidence) {
-      drop(`confidence below ${minConfidence}`);
+      // The one floor observation may cross. Contradicted stays dropped —
+      // watching a source is not a reason to analyse something we have
+      // positive evidence is false — and so does unclassified, which is not a
+      // judgement about the source at all.
+      if (allSourcesObserved(event, observed) && observationBudget > 0) {
+        observationBudget -= 1;
+        kept.push(event);
+      } else if (allSourcesObserved(event, observed)) {
+        drop('observation budget spent this cycle');
+      } else {
+        drop(`confidence below ${minConfidence}`);
+      }
     } else {
       kept.push(event);
     }

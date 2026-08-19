@@ -647,7 +647,13 @@ export class TradingAgent {
       return;
     }
 
-    const { kept: worthAnalysing, droppedByReason: gateDrops } = evaluateAnalysisGate(events);
+    const { kept: worthAnalysing, droppedByReason: gateDrops } = evaluateAnalysisGate(events, {
+      // A watched source's events may cross the confidence floor, because
+      // whether to believe it is precisely the question observation exists to
+      // answer. The risk engine still refuses the order.
+      observationSources: this.observationOnlySources,
+      observationBudget: this.config.OBSERVATION_ANALYSIS_PER_CYCLE,
+    });
     funnel.step('analysis_gate', worthAnalysing.length, gateDrops);
     if (events.length > 0 && worthAnalysing.length === 0) {
       // The most common reason nothing trades, and previously invisible: the

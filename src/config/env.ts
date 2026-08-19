@@ -187,6 +187,13 @@ const rawSchema = z.object({
    * Promotion is automatic — no edit here is needed once the study measures it.
    */
   OBSERVATION_ONLY_SOURCES: csv([]),
+  /**
+   * How many events from watched sources may be analysed per cycle despite
+   * falling under the confidence floor. Every one is a paid LLM call on
+   * information nobody has yet shown to be worth anything, so it is a budget
+   * rather than a switch.
+   */
+  OBSERVATION_ANALYSIS_PER_CYCLE: num(3),
 });
 
 export const LIVE_CONFIRMATION_PHRASE = 'I_UNDERSTAND_REAL_MONEY_RISK';
