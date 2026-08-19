@@ -45,6 +45,7 @@ import { CorrelationGroups } from '../../src/risk/correlation.js';
 import { PositionManager } from '../../src/risk/position-manager.js';
 import type { RiskDecision } from '../../src/risk/types.js';
 import { EvidenceBook } from '../../src/strategy/evidence.js';
+import { observationVerdict } from '../../src/strategy/observation.js';
 import { detectRegime, type MarketRegime } from '../../src/strategy/regime.js';
 import { SignalGenerator } from '../../src/strategy/signals/generator.js';
 import type { Signal } from '../../src/strategy/signals/types.js';
@@ -139,6 +140,8 @@ export class TradingAgent {
   readonly evidence: EvidenceBook | undefined;
   /** Estimated correlation groups, when they have been computed. */
   readonly correlations: CorrelationGroups | undefined;
+  /** Sources that may be watched but not traded on until measured. */
+  readonly observationOnlySources: ReadonlySet<string>;
 
   private readonly recentSignals: Signal[] = [];
   private readonly recentEvents: MarketEvent[] = [];
@@ -182,6 +185,7 @@ export class TradingAgent {
     this.evidence = options.evidence ?? EvidenceBook.load(options.config.EVIDENCE_FILE);
     this.correlations =
       options.correlations ?? CorrelationGroups.load(options.config.CORRELATION_FILE);
+    this.observationOnlySources = new Set(options.config.OBSERVATION_ONLY_SOURCES);
 
     this.discord =
       options.discord ??
@@ -691,9 +695,11 @@ export class TradingAgent {
     const riskRejectedBefore = this.state.ordersRejectedByRisk;
     const approvalRejectedBefore = this.state.ordersRejectedByApproval;
 
+    let observationBlocked = 0;
     for (const event of analysed) {
       try {
-        await this.processEvent(event, documents);
+        const result = await this.processEvent(event, documents);
+        if (result.observationBlocked) observationBlocked += 1;
       } catch (err) {
         this.recordError('analysis', `${event.id}: ${(err as Error).message}`);
       }
@@ -717,7 +723,13 @@ export class TradingAgent {
 
       const riskReasons: Record<string, number> = {};
       if (riskRejected > 0) riskReasons['risk rejected'] = riskRejected;
-      if (notEvaluated > 0) riskReasons['not tradeable or halted'] = notEvaluated;
+      if (observationBlocked > 0) riskReasons['observation only'] = observationBlocked;
+      // Whatever is left never reached the engine for a duller reason: no
+      // symbol or price to trade on, or trading halted this cycle. Reported
+      // apart from the observation gate, because "we chose not to trust this
+      // source yet" and "there was no price" are different answers.
+      const otherwiseUnevaluated = notEvaluated - observationBlocked;
+      if (otherwiseUnevaluated > 0) riskReasons['not tradeable or halted'] = otherwiseUnevaluated;
       funnel.step('risk', riskApproved, riskReasons);
 
       if (riskApproved > 0) {
@@ -732,7 +744,18 @@ export class TradingAgent {
     metrics.observe('agent.cycle', this.clock.nowMs() - cycleStart);
   }
 
-  private async processEvent(event: MarketEvent, documents: NormalizedDocument[]): Promise<void> {
+  /**
+   * Analyse one event and, if everything allows it, act on it.
+   *
+   * Returns what the cycle needs to explain itself: whether the observation
+   * gate is the reason no order followed. That is reported rather than folded
+   * into "not tradeable", because "we chose not to trust this source yet" and
+   * "there was no price" are different answers to the same silence.
+   */
+  private async processEvent(
+    event: MarketEvent,
+    documents: NormalizedDocument[],
+  ): Promise<{ observationBlocked: boolean }> {
     const symbol = event.tickers[0];
     const eventDocuments = documents.filter((doc) => event.documentIds.includes(doc.id));
 
@@ -800,7 +823,7 @@ export class TradingAgent {
         'no-signal',
         `${event.type}: ${skipped ?? 'no hypothesis'}`,
       );
-      return;
+      return { observationBlocked: false };
     }
 
     this.state.signalsGenerated += 1;
@@ -815,8 +838,20 @@ export class TradingAgent {
     let riskDecision: RiskDecision | undefined;
     let order: Order | undefined;
 
+    // Watched but not yet trusted: the analysis above has already been paid
+    // for and journalled, which is the point — the decision is recorded and
+    // will be scored — but a source the study has never measured does not get
+    // to move money on the strength of it.
+    const observation = observationVerdict(event, this.observationOnlySources, this.evidence);
+    if (!observation.trades) {
+      this.activity.warn('observation', `${signal.action} ${signal.asset} not placed — ${observation.reason}`);
+    }
+
     const tradeable =
-      (signal.action === 'BUY' || signal.action === 'SELL') && symbol !== undefined && price !== undefined;
+      observation.trades &&
+      (signal.action === 'BUY' || signal.action === 'SELL') &&
+      symbol !== undefined &&
+      price !== undefined;
 
     if (tradeable && !this.state.halted) {
       // Without a group the engine skips the correlated-exposure check
@@ -910,6 +945,8 @@ export class TradingAgent {
       ...(riskDecision ? { riskDecision } : {}),
       ...(order ? { order } : {}),
     });
+
+    return { observationBlocked: !observation.trades };
   }
 
   /**

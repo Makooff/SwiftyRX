@@ -169,6 +169,24 @@ const rawSchema = z.object({
   WATCHLIST: csv(['AAPL', 'MSFT', 'NVDA']),
   INGEST_INTERVAL_SECONDS: num(60),
   ENABLED_SOURCES: csv([]),
+
+  /**
+   * Source ids that may be watched but not traded on.
+   *
+   * An event whose every source is listed here is ingested, detected, analysed
+   * and journalled as normal, and then stopped before the Risk Engine, until
+   * the event study has measured the category it falls in. One source outside
+   * the list corroborating the event is enough to let it through.
+   *
+   * The analysis is still paid for on purpose: the journal fills with the
+   * decisions the source would have taken, and outcome tracking scores them.
+   * That buys a measured answer about a new source with LLM calls instead of
+   * with capital.
+   *
+   * Empty by default, so nothing changes until a source is deliberately added.
+   * Promotion is automatic — no edit here is needed once the study measures it.
+   */
+  OBSERVATION_ONLY_SOURCES: csv([]),
 });
 
 export const LIVE_CONFIRMATION_PHRASE = 'I_UNDERSTAND_REAL_MONEY_RISK';

@@ -3,11 +3,7 @@ import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/config/env.js';
 import { loadEnvFile } from '../src/config/load-env.js';
 import { createLogger } from '../src/core/logger.js';
-import {
-  formatDuration,
-  parseSymbolsFile,
-  resolveUniverse,
-} from '../src/backtesting/universe.js';
+import { parseSymbolsFile, resolveUniverse } from '../src/backtesting/universe.js';
 import { buildIngestionStack } from '../src/ingestion/pipeline.js';
 import {
   CorrelationGroups,
@@ -137,8 +133,7 @@ console.log(
     `${grouped.length} contain more than one name.`,
 );
 console.log(
-  `  A pair needed ${MIN_SHARED_SESSIONS} shared sessions to be compared at all, over a ` +
-    `${formatDuration(days * 86_400)} window.`,
+  `  A pair needed ${MIN_SHARED_SESSIONS} shared sessions to be compared at all, over a ${days}d window.`,
 );
 console.log(
   '\n  Correlations are estimated on one past window and rise toward one in a sell-off,\n' +

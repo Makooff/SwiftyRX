@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createApiServer } from '../apps/api/server.js';
-import { assertExposureIsSafe, UnsafeExposureError } from '../apps/api/auth.js';
+import { assertExposureIsSafe, looksPubliclyRouted, UnsafeExposureError } from '../apps/api/auth.js';
 import { ConfigError, loadConfig } from '../src/config/env.js';
 import { FixedClock } from '../src/core/clock.js';
 import { TradingAgent } from '../apps/worker/agent.js';
@@ -102,6 +102,79 @@ describe('dashboard exposure gate', () => {
     expect(() => loadConfig({ DASHBOARD_HOST: '0.0.0.0', DASHBOARD_PASSWORD: 'short' })).toThrow(
       ConfigError,
     );
+  });
+});
+
+/**
+ * The exposure a bind address cannot see.
+ *
+ * `assertExposureIsSafe` runs once, against the host the socket listens on. A
+ * tunnel leaves that answer at 127.0.0.1 and puts the dashboard on the public
+ * internet anyway, so the startup gate passes and the portfolio is served to
+ * whoever has the URL. These tests pin the second gate, which asks the same
+ * question per request.
+ */
+describe('recognising a request that arrived from outside', () => {
+  it('sees a tunnel by the forwarding header it adds', () => {
+    expect(looksPubliclyRouted({ 'x-forwarded-for': '203.0.113.9' })).toBe(true);
+    expect(looksPubliclyRouted({ forwarded: 'for=203.0.113.9' })).toBe(true);
+    expect(looksPubliclyRouted({ 'x-forwarded-host': 'agent.example.com' })).toBe(true);
+  });
+
+  it('sees a public hostname even with no forwarding header', () => {
+    expect(looksPubliclyRouted({ host: 'abc-def.trycloudflare.com' })).toBe(true);
+    expect(looksPubliclyRouted({ host: '203.0.113.9:3000' })).toBe(true);
+  });
+
+  it('leaves a local browser and an SSH forward alone', () => {
+    // ssh -L makes the browser ask for localhost, which is the recommended
+    // path and must not start being refused.
+    for (const host of ['127.0.0.1:3000', 'localhost:3000', 'localhost', '[::1]:3000']) {
+      expect(looksPubliclyRouted({ host }), `${host} was called public`).toBe(false);
+    }
+  });
+
+  it('draws no conclusion from a request with no Host at all', () => {
+    expect(looksPubliclyRouted({})).toBe(false);
+  });
+});
+
+describe('serving a passwordless dashboard through a tunnel', () => {
+  it('refuses, and says which variable fixes it', async () => {
+    const response = await request({}, { 'x-forwarded-for': '203.0.113.9' });
+    expect(response.status).toBe(403);
+    expect(response.body).toMatch(/DASHBOARD_PASSWORD/);
+  });
+
+  it('leaks no portfolio data in the refusal', async () => {
+    const response = await request({}, { 'x-forwarded-for': '203.0.113.9' });
+    expect(response.body).not.toContain('10000');
+    expect(response.body).not.toContain('AI Market Agent');
+  });
+
+  it('refuses the JSON API too, not only the page', async () => {
+    for (const path of ['/api/state', '/api/portfolio', '/api/diagnostic']) {
+      const response = await request({}, { 'x-forwarded-for': '203.0.113.9' }, path);
+      expect(response.status, `${path} was served`).toBe(403);
+    }
+  });
+
+  it('serves it once a password is set — the tunnel is not the problem', async () => {
+    // The gate exists to require a password, not to ban tunnels. With one set,
+    // the ordinary Basic challenge takes over.
+    const response = await request(
+      { DASHBOARD_PASSWORD: PASSWORD },
+      { ...basic('admin', PASSWORD), 'x-forwarded-for': '203.0.113.9' },
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it('still challenges an anonymous request through the tunnel', async () => {
+    const response = await request(
+      { DASHBOARD_PASSWORD: PASSWORD },
+      { 'x-forwarded-for': '203.0.113.9' },
+    );
+    expect(response.status).toBe(401);
   });
 });
 

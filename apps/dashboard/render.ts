@@ -111,36 +111,160 @@ function funnelStepRows(steps: CycleFunnel['steps']): string {
     .map(
       (step) => `<tr>
         <td>${escapeHtml(FUNNEL_STAGE_LABELS[step.stage])}</td>
-        <td class="mono">${step.count}</td>
+        <td class="count">${step.count}</td>
         <td class="muted">${funnelReasonsText(step.reasons)}</td>
       </tr>`,
     )
     .join('');
 }
 
+/** A section folded away by default — present, not competing for attention. */
+function foldable(title: string, body: string): string {
+  return `<section class="fold">
+    <details data-fold="${escapeHtml(title)}">
+      <summary><span class="fold-title">${escapeHtml(title)}</span></summary>
+      <div class="fold-body">${body}</div>
+    </details>
+  </section>`;
+}
+
+type VerdictTone = 'ok' | 'warn' | 'bad';
+
+/**
+ * The one thing worth reading first: is this working, and what is it doing?
+ *
+ * A dashboard of ten equal panels makes a person reconstruct that answer every
+ * time, and the two states it most needs to separate — quietly working, and
+ * stuck — look identical when reconstructed from a portfolio that has not
+ * moved. So the answer is computed once, stated in a sentence, and given the
+ * only large piece of colour on the page.
+ */
+function verdict(data: DashboardData): { tone: VerdictTone; headline: string; detail: string } {
+  const age = data.cycleAgeSeconds;
+  const unavailable = data.health.filter((report) => report.state === 'unavailable');
+
+  if (data.agent.halted) {
+    return {
+      tone: 'bad',
+      headline: 'Trading halted',
+      detail: data.agent.haltReasons.join(' · '),
+    };
+  }
+
+  if (data.agent.cycles === 0 || age === undefined) {
+    return {
+      tone: 'warn',
+      headline: 'No cycle has run yet',
+      detail: 'The agent has not completed a pass. If this persists, check the service logs.',
+    };
+  }
+
+  // Cycles are paced by INGEST_INTERVAL_SECONDS, 60 by default. Five minutes
+  // of silence is several missed cycles, not a slow one.
+  if (age > 300) {
+    return {
+      tone: 'warn',
+      headline: `Last cycle ${formatAge(age)} — the agent may be stuck`,
+      detail: 'Cycles normally complete every minute.',
+    };
+  }
+
+  if (unavailable.length > 0) {
+    return {
+      tone: 'warn',
+      headline: `${unavailable.length} source(s) unavailable`,
+      detail: unavailable.map((report) => report.adapter).join(', '),
+    };
+  }
+
+  if (data.agent.errors.length > 0) {
+    return {
+      tone: 'warn',
+      headline: `Running, with ${data.agent.errors.length} recent error(s)`,
+      detail: data.agent.errors[0]?.message ?? '',
+    };
+  }
+
+  return {
+    tone: 'ok',
+    headline: 'Running normally',
+    // The funnel's own sentence, which already says whether the silence is the
+    // system working or the system stuck.
+    detail: data.funnels[0]?.summary ?? 'Waiting for the first cycle to complete.',
+  };
+}
+
 const STYLES = `
 :root {
   --bg: #0e1116; --panel: #161b22; --border: #2a313a; --text: #d5dae1;
   --muted: #8b949e; --pos: #3fb950; --neg: #f85149; --warn: #d29922; --accent: #58a6ff;
+  /* Spacing scale. Every gap and pad below comes from here, so "a bit more
+     room" is a change to one number rather than to thirty. */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+  --r1: 8px; --r2: 12px; --pill: 999px;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-base: 15px; --fs-lg: 18px; --fs-xl: 26px;
+  /* Minimum comfortable target for anything a finger has to hit. */
+  --tap: 44px;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
-  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-header { padding: 16px 24px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
-h1 { font-size: 18px; margin: 0; font-weight: 600; }
-.badge { padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
-  border: 1px solid var(--border); }
+  font: var(--fs-base)/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r1); }
+header { padding: var(--s4) var(--s5); border-bottom: 1px solid var(--border);
+  display: flex; align-items: baseline; gap: var(--s4); flex-wrap: wrap; }
+h1 { font-size: var(--fs-lg); margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+.badge { padding: var(--s1) var(--s3); border-radius: var(--pill); font-size: var(--fs-xs);
+  font-weight: 600; border: 1px solid var(--border); }
 .badge.paper { background: #1f2d3d; color: var(--accent); border-color: #2b4a6f; }
 .badge.live { background: #4a1d1d; color: var(--neg); border-color: #6f2b2b; }
-main { padding: 24px; display: grid; gap: 20px; max-width: 1500px; }
-.grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
-section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
-h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em;
-  color: var(--muted); margin: 0 0 14px; font-weight: 600; }
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; }
-.stat .label { color: var(--muted); font-size: 12px; }
-.stat .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+main { padding: var(--s5); display: grid; gap: var(--s5); max-width: 1500px; }
+/* 380px, not 320: below that the Money panel is narrow enough that a
+   five-figure total wraps its currency onto a second line. Stacking is the
+   cheaper compromise — vertical room is free, a broken number is not. */
+.grid { display: grid; gap: var(--s5);
+  /* min() and not a bare 380px: minmax's floor outranks the container, so on
+     a 375px phone a bare value would push the track wider than the screen. */
+  grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); }
+/* A grid item defaults to min-width:auto, so it refuses to shrink below its
+   content's intrinsic width. One table with a min-width would widen its track,
+   then the page, and the overflow-x:auto meant to contain it never engages.
+   This is what makes .scroll actually scroll instead of stretching the layout. */
+main > *, .grid > *, .verdict > * { min-width: 0; }
+section { background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--r2); padding: var(--s5); }
+h2 { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); margin: 0 0 var(--s4); font-weight: 600; }
+
+/* The verdict: the one dominant element. Everything else on the page is
+   deliberately quieter than this. */
+.verdict { display: flex; gap: var(--s4); align-items: flex-start; }
+.verdict .lamp { width: 12px; height: 12px; border-radius: var(--pill);
+  margin-top: calc(var(--s2) + 2px); flex: none; }
+.verdict.ok .lamp { background: var(--pos); }
+.verdict.warn .lamp { background: var(--warn); }
+.verdict.bad .lamp { background: var(--neg); }
+.verdict h2 { font-size: var(--fs-xl); text-transform: none; letter-spacing: -0.02em;
+  color: var(--text); margin: 0 0 var(--s2); font-weight: 600; line-height: 1.25; }
+.verdict .say { color: var(--muted); margin: 0; }
+.verdict .meta { color: var(--muted); font-size: var(--fs-sm); margin: var(--s3) 0 0; }
+
+/* Folded sections: present, and not competing for the eye. */
+.fold { padding: 0; }
+.fold summary { list-style: none; cursor: pointer; padding: 0 var(--s5);
+  min-height: var(--tap); display: flex; align-items: center; gap: var(--s2);
+  color: var(--muted); font-size: var(--fs-xs); text-transform: uppercase;
+  letter-spacing: .07em; font-weight: 600;
+  transition: color 160ms cubic-bezier(0.16, 1, 0.3, 1); }
+.fold summary::-webkit-details-marker { display: none; }
+.fold summary::before { content: "▸"; font-size: var(--fs-sm); }
+.fold details[open] summary::before, .fold details[open] > summary::before { content: "▾"; }
+.fold summary:hover { color: var(--text); }
+.fold-body { padding: 0 var(--s5) var(--s5); }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: var(--s4); }
+.stat .label { color: var(--muted); font-size: var(--fs-xs); }
+.stat .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em; }
 .pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
 /* Tables scroll inside their own box rather than stretching the page. A
    six-column table on a phone otherwise forces the whole layout sideways,
@@ -148,18 +272,22 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em;
 .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums;
   min-width: 460px; }
-th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px;
-  padding: 6px 8px; border-bottom: 1px solid var(--border); }
-td { padding: 7px 8px; border-bottom: 1px solid #1d232b; vertical-align: top; }
+th { text-align: left; color: var(--muted); font-weight: 500; font-size: var(--fs-xs);
+  padding: var(--s2) var(--s2); border-bottom: 1px solid var(--border); }
+td { padding: var(--s2); border-bottom: 1px solid #1d232b; vertical-align: top; }
 tr:last-child td { border-bottom: none; }
 .muted { color: var(--muted); }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.empty { color: var(--muted); font-style: italic; padding: 8px 0; }
-details { margin-top: 8px; }
-summary { cursor: pointer; color: var(--accent); font-size: 13px; }
-.factors { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.chip { background: #1d232b; border: 1px solid var(--border); border-radius: 6px;
-  padding: 2px 8px; font-size: 11px; }
+.note { color: var(--muted); font-size: var(--fs-xs); margin: var(--s3) 0 0; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-xs); }
+/* The number a funnel row exists to report: same size as its label so the
+   two share a baseline, heavier so the eye lands on it first. */
+.count { font-weight: 600; }
+.empty { color: var(--muted); font-style: italic; padding: var(--s2) 0; }
+details { margin-top: var(--s2); }
+summary { cursor: pointer; color: var(--accent); font-size: var(--fs-sm); }
+.factors { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s2); }
+.chip { background: #1d232b; border: 1px solid var(--border); border-radius: var(--r1);
+  padding: var(--s1) var(--s2); font-size: 11px; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 .dot.healthy { background: var(--pos); } .dot.degraded { background: var(--warn); }
 .dot.unavailable { background: var(--neg); } .dot.disabled { background: #4a5158; }
@@ -181,6 +309,29 @@ ul { margin: 6px 0 0; padding-left: 18px; }
 .lv-good .stage { color: var(--pos); }
 .lv-warn .stage { color: var(--warn); }
 .lv-error .stage { color: var(--neg); }
+
+@media (max-width: 600px) {
+  main, header { padding: var(--s4); }
+  /* The funnel is the one table read to answer "why did nothing happen", so its
+     reason column is exactly the part that must not scroll off a phone. Each
+     row becomes two lines instead: what the stage kept, then what it dropped. */
+  .funnel { min-width: 0; }
+  .funnel thead { display: none; }
+  .funnel tr { display: grid; grid-template-columns: 1fr auto; column-gap: var(--s3);
+    padding: var(--s2) 0; border-bottom: 1px solid #1d232b; }
+  .funnel tr:last-child { border-bottom: none; }
+  .funnel td { border: none; padding: 0; }
+  .funnel td:nth-child(3) { grid-column: 1 / -1; font-size: var(--fs-sm); margin-top: var(--s1); }
+  .funnel td:nth-child(3):empty { display: none; }
+  section { padding: var(--s4); }
+  .fold summary { padding: 0 var(--s4); }
+  .fold-body { padding: 0 var(--s4) var(--s4); }
+  .verdict h2 { font-size: 21px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
 `;
 
 export function renderDashboard(data: DashboardData): string {
@@ -336,10 +487,19 @@ export function renderDashboard(data: DashboardData): string {
     })
     .join('');
 
+  const state = verdict(data);
   const [latestFunnel, ...previousFunnels] = data.funnels;
+  // The banner carries the cycle age unconditionally, and the funnel's own
+  // sentence too whenever nothing is wrong. Reprinting either twelve pixels
+  // lower reads as two facts when it is one — so this line exists only in the
+  // states where the banner had something more urgent to say.
+  const funnelLead =
+    latestFunnel && state.detail !== latestFunnel.summary
+      ? `<p class="muted" style="margin:0 0 12px">${escapeHtml(latestFunnel.summary)}</p>`
+      : '';
   const funnelSection = latestFunnel
-    ? `<p class="muted" style="margin:0 0 12px">${escapeHtml(latestFunnel.summary)} &middot; last cycle ${formatAge(data.cycleAgeSeconds)}</p>
-    <div class="scroll"><table>
+    ? `${funnelLead}
+    <div class="scroll"><table class="funnel">
       <thead><tr><th>Stage</th><th>Count</th><th>Dropped</th></tr></thead>
       <tbody>${funnelStepRows(latestFunnel.steps)}</tbody>
     </table></div>
@@ -364,8 +524,8 @@ export function renderDashboard(data: DashboardData): string {
           .map(
             ([type, { hitRate, sampleSize }]) => `<tr>
         <td>${escapeHtml(type)}</td>
-        <td class="mono">${(hitRate * 100).toFixed(1)}%</td>
-        <td class="muted mono">${sampleSize}</td>
+        <td class="count">${(hitRate * 100).toFixed(1)}%</td>
+        <td class="muted">${sampleSize}</td>
         <td class="muted">${sampleSize < 30 ? 'too few to read' : ''}</td>
       </tr>`,
           )
@@ -396,111 +556,109 @@ export function renderDashboard(data: DashboardData): string {
 <header>
   <h1>AI Market Agent</h1>
   <span class="badge ${data.liveTrading ? 'live' : 'paper'}">${data.liveTrading ? 'LIVE — REAL MONEY' : `${escapeHtml(data.mode.toUpperCase())} — NO REAL MONEY`}</span>
-  <span class="muted">cycle ${data.agent.cycles} &middot; ${escapeHtml(data.agent.lastCycleAt?.slice(11, 19) ?? 'not run')} &middot; LLM: ${escapeHtml(data.llmProvider)}</span>
+  <span class="muted">cycle ${data.agent.cycles} &middot; LLM: ${escapeHtml(data.llmProvider)}</span>
 </header>
 <main>
-  ${
-    data.agent.halted
-      ? `<div class="notice"><strong>Trading halted.</strong><ul>${data.agent.haltReasons
-          .map((r) => `<li>${escapeHtml(r)}</li>`)
-          .join('')}</ul></div>`
-      : ''
-  }
+  <section class="verdict ${state.tone}">
+    <span class="lamp" aria-hidden="true"></span>
+    <div>
+      <h2>${escapeHtml(state.headline)}</h2>
+      <p class="say">${escapeHtml(state.detail)}</p>
+      <p class="meta">Last cycle ${escapeHtml(formatAge(data.cycleAgeSeconds))} · ${data.agent.cycles} run in total · ${data.agent.errors.length} recent error(s)</p>
+    </div>
+  </section>
 
   <section>
-    <h2>Cycle funnel</h2>
+    <h2>What happened in the last cycle</h2>
     ${funnelSection}
   </section>
 
-  <section>
-    <h2>Portfolio</h2>
-    <div class="stats">
-      <div class="stat"><div class="label">Total value</div><div class="value">${p.totalValue.toFixed(2)} ${escapeHtml(data.currency)}</div></div>
-      <div class="stat"><div class="label">Cash</div><div class="value">${p.cash.toFixed(2)}</div></div>
-      <div class="stat"><div class="label">Return</div><div class="value ${pnlClass(p.totalReturnPct)}">${p.totalReturnPct.toFixed(2)}%</div></div>
-      <div class="stat"><div class="label">Drawdown</div><div class="value ${p.drawdownPct > 0 ? 'neg' : ''}">${p.drawdownPct.toFixed(2)}%</div></div>
-      <div class="stat"><div class="label">Max drawdown</div><div class="value ${p.maxDrawdownPct > 0 ? 'neg' : ''}">${p.maxDrawdownPct.toFixed(2)}%</div></div>
-      <div class="stat"><div class="label">Exposure</div><div class="value">${p.exposurePct.toFixed(1)}%</div></div>
-    </div>
-    <div class="scroll"><table style="margin-top:16px">
-      <thead><tr><th>Symbol</th><th>Qty</th><th>Avg price</th><th>Value</th><th>Unrealised</th></tr></thead>
-      <tbody>${positionsRows}</tbody>
-    </table></div>
-  </section>
+  <div class="grid">
+    <section>
+      <h2>Money</h2>
+      <div class="stats">
+        <div class="stat"><div class="label">Total value</div><div class="value">${p.totalValue.toFixed(2)} ${escapeHtml(data.currency)}</div></div>
+        <div class="stat"><div class="label">Cash</div><div class="value">${p.cash.toFixed(2)}</div></div>
+        <div class="stat"><div class="label">Return</div><div class="value ${pnlClass(p.totalReturnPct)}">${p.totalReturnPct.toFixed(2)}%</div></div>
+        <div class="stat"><div class="label">Drawdown</div><div class="value ${p.drawdownPct > 0 ? 'neg' : ''}">${p.drawdownPct.toFixed(2)}%</div></div>
+      </div>
+      <div class="scroll"><table style="margin-top:var(--s4)">
+        <thead><tr><th>Symbol</th><th>Qty</th><th>Avg price</th><th>Value</th><th>Unrealised</th></tr></thead>
+        <tbody>${positionsRows}</tbody>
+      </table></div>
+      <p class="note">Worst drawdown so far ${p.maxDrawdownPct.toFixed(2)}% &middot;
+        ${p.exposurePct.toFixed(1)}% of the portfolio is currently in positions.</p>
+    </section>
+
+    <section>
+      <h2>Was it right?</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Event type</th><th>Direction right</th><th>n</th><th></th></tr></thead>
+        <tbody>${outcomeRows}</tbody>
+      </table></div>
+      <p class="note">
+        Scored once the signal's own horizon has elapsed, against the first session at or after it.
+        ${data.outcomes.pending > 0 ? `${data.outcomes.pending} decision(s) due but not yet priced. ` : ''}
+        HOLD and WATCH are not scored: they predict no direction. Below n=30 the scorer refuses to use it.
+      </p>
+      ${
+        data.unmeasurableEventTypes.length > 0
+          ? `<p class="note"><span class="warn">No study can measure</span>
+        ${data.unmeasurableEventTypes.map((e) => `${escapeHtml(e.type)} (${e.recentEvents})`).join(', ')}
+        — no filing category maps onto these, so the evidence gate could never block them.</p>`
+          : ''
+      }
+    </section>
+  </div>
 
   <section>
-    <h2>Signals</h2>
+    <h2>Recent signals</h2>
     <div class="scroll"><table>
       <thead><tr><th>Time</th><th>Asset</th><th>Action</th><th>Score</th><th>Model conf.</th><th>Catalyst &amp; reasoning</th></tr></thead>
       <tbody>${signalRows}</tbody>
     </table></div>
   </section>
 
-  <div class="grid">
-    <section>
-      <h2>Events</h2>
-      <div class="scroll"><table>
-        <thead><tr><th>Type</th><th>Headline</th><th>Materiality</th><th>Verification</th><th>Tickers</th></tr></thead>
-        <tbody>${eventRows}</tbody>
-      </table></div>
-    </section>
+  ${foldable(
+    'Events and orders',
+    `<div class="grid">
+      <div>
+        <h2>Events</h2>
+        <div class="scroll"><table>
+          <thead><tr><th>Type</th><th>Headline</th><th>Materiality</th><th>Verification</th><th>Tickers</th></tr></thead>
+          <tbody>${eventRows}</tbody>
+        </table></div>
+      </div>
+      <div>
+        <h2>Orders</h2>
+        <div class="scroll"><table>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill</th><th>Status</th><th>Costs</th></tr></thead>
+          <tbody>${orderRows}</tbody>
+        </table></div>
+      </div>
+    </div>`,
+  )}
 
-    <section>
-      <h2>Orders</h2>
-      <div class="scroll"><table>
-        <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill</th><th>Status</th><th>Costs</th></tr></thead>
-        <tbody>${orderRows}</tbody>
-      </table></div>
-    </section>
-  </div>
-
-  <section>
-    <h2>Exit plans</h2>
-    <div class="scroll"><table>
+  ${foldable(
+    'Exit plans',
+    `<div class="scroll"><table>
       <thead><tr><th>Symbol</th><th>Stop</th><th>Target</th><th>Expires</th></tr></thead>
       <tbody>${exitRows}</tbody>
     </table></div>
-    <p class="muted" style="margin:10px 0 0;font-size:12px">
+    <p class="note">
       Checked once per cycle against our own marks — these are not resting orders at the
       broker, so a gap can fill worse than the stop.
-    </p>
-  </section>
+    </p>`,
+  )}
 
-  <section>
-    <h2>Decision outcomes</h2>
-    <div class="scroll"><table>
-      <thead><tr><th>Event type</th><th>Direction right</th><th>n</th><th></th></tr></thead>
-      <tbody>${outcomeRows}</tbody>
-    </table></div>
-    <p class="muted" style="margin:10px 0 0;font-size:12px">
-      Scored once the signal's own horizon has elapsed, against the first session at or after it.
-      ${data.outcomes.pending > 0 ? `${data.outcomes.pending} decision(s) due but not yet priced. ` : ''}
-      HOLD and WATCH are not scored: they predict no direction. This is the number handed to the
-      model before each new signal — below n=30 the scorer refuses to use it.
-    </p>
-    ${
-      data.unmeasurableEventTypes.length > 0
-        ? `<p class="muted" style="margin:10px 0 0;font-size:12px">
-      <span class="warn">No study can measure</span>
-      ${data.unmeasurableEventTypes
-        .map((e) => `${escapeHtml(e.type)} (${e.recentEvents})`)
-        .join(', ')}
-      — no filing category maps onto these, so the evidence gate could never block them
-      however they perform.
-    </p>`
-        : ''
-    }
-  </section>
-
-  <section>
-    <h2>Evidence</h2>
-    ${
-      data.evidence
-        ? `<div class="scroll"><table>
+  ${foldable(
+    'Evidence ledger',
+    data.evidence
+      ? `<div class="scroll"><table>
       <thead><tr><th>Filing</th><th>Event type</th><th>Status</th><th>Abnormal drift</th><th>Net of costs</th><th>n / symbols</th></tr></thead>
       <tbody>${evidenceRows}</tbody>
     </table></div>
-    <p class="muted" style="margin:10px 0 0;font-size:12px">
+    <p class="note">
       From <span class="mono">npm run study</span> over ${data.evidence.windowYears}y and
       ${data.evidence.symbols} symbols${data.evidence.benchmark ? `, abnormal vs ${escapeHtml(data.evidence.benchmark)}` : ', NOT market-adjusted'},
       net of a ${data.evidence.roundTripCostPct}% round trip. Generated
@@ -508,32 +666,14 @@ export function renderDashboard(data: DashboardData): string {
       A red row is refused outright; a green one is <em>not</em> a licence — it is one
       sample of one regime, and the ordinary gates still decide it.
     </p>`
-        : `<div class="empty">No study has been run. Nothing is being blocked on evidence.<br>
+      : `<div class="empty">No study has been run. Nothing is being blocked on evidence.<br>
       <span class="mono">npm run study -- --years 5 --out</span> measures whether these filings
-      are followed by any abnormal move at all, and writes what it finds here.</div>`
-    }
-  </section>
+      are followed by any abnormal move at all, and writes what it finds here.</div>`,
+  )}
 
-  <section>
-    <h2>Settings</h2>
-    <div class="scroll"><table>
-      <thead><tr><th>Setting</th><th>Value</th><th></th></tr></thead>
-      <tbody>${settingsRows}</tbody>
-    </table></div>
-    <p class="muted" style="margin:10px 0 0;font-size:12px">
-      Read-only. Changing these means editing <span class="mono">.env</span> and restarting —
-      deliberately: a dashboard that can retune risk limits is a dashboard that can remove them.
-    </p>
-  </section>
-
-  <section>
-    <h2>Activity</h2>
-    <div class="feed">${activityRows}</div>
-  </section>
-
-  <section>
-    <h2>System health</h2>
-    <div class="stats" style="margin-bottom:14px">
+  ${foldable(
+    'Sources and totals',
+    `<div class="stats" style="margin-bottom:var(--s4)">
       <div class="stat"><div class="label">Documents</div><div class="value">${data.agent.documentsIngested}</div></div>
       <div class="stat"><div class="label">Events</div><div class="value">${data.agent.eventsDetected}</div></div>
       <div class="stat"><div class="label">Signals</div><div class="value">${data.agent.signalsGenerated}</div></div>
@@ -545,6 +685,7 @@ export function renderDashboard(data: DashboardData): string {
       <thead><tr><th>Source</th><th>Kind</th><th>State</th><th>Detail</th></tr></thead>
       <tbody>${healthRows}</tbody>
     </table></div>
+    <p class="note">Totals are lifetime, across every cycle since this experiment began — not this cycle.</p>
     ${
       data.agent.errors.length > 0
         ? `<details><summary>Recent errors</summary><ul>${data.agent.errors
@@ -552,8 +693,43 @@ export function renderDashboard(data: DashboardData): string {
             .map((e) => `<li class="muted mono">${escapeHtml(e.at.slice(11, 19))} [${escapeHtml(e.stage)}] ${escapeHtml(e.message)}</li>`)
             .join('')}</ul></details>`
         : ''
-    }
-  </section>
+    }`,
+  )}
+
+  ${foldable('Activity log', `<div class="feed">${activityRows}</div>`)}
+
+  ${foldable(
+    'Settings',
+    `<div class="scroll"><table>
+      <thead><tr><th>Setting</th><th>Value</th><th></th></tr></thead>
+      <tbody>${settingsRows}</tbody>
+    </table></div>
+    <p class="note">
+      Read-only. Changing these means editing <span class="mono">.env</span> and restarting —
+      deliberately: a dashboard that can retune risk limits is a dashboard that can remove them.
+    </p>`,
+  )}
 </main>
+<script>
+  // The page reloads every 15s, which would close whatever you had just
+  // opened to read. Remember the open sections for the session. No framework
+  // and no build step: without JS the folds simply start closed, as they do
+  // on a first visit.
+  (function () {
+    try {
+      var open = JSON.parse(sessionStorage.getItem('openFolds') || '[]');
+      document.querySelectorAll('details[data-fold]').forEach(function (el) {
+        if (open.indexOf(el.dataset.fold) !== -1) el.open = true;
+        el.addEventListener('toggle', function () {
+          var now = [].slice
+            .call(document.querySelectorAll('details[data-fold]'))
+            .filter(function (d) { return d.open; })
+            .map(function (d) { return d.dataset.fold; });
+          sessionStorage.setItem('openFolds', JSON.stringify(now));
+        });
+      });
+    } catch (e) { /* storage blocked — folds just start closed */ }
+  })();
+</script>
 </body></html>`;
 }
