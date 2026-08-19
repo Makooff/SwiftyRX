@@ -1,6 +1,7 @@
 import type { AppConfig } from '../config/env.js';
 import { type Clock, systemClock } from '../core/clock.js';
 import { createLogger, type Logger } from '../core/logger.js';
+import { instrumentVerdict } from './instrument.js';
 import { sizePosition } from './position-sizing.js';
 import type { PortfolioSnapshot, RiskDecision, RiskRejection, RiskRequest } from './types.js';
 
@@ -142,6 +143,11 @@ export class RiskEngine {
         detail: 'not enforced outside live mode',
       });
     }
+
+    // Enforced in every mode, not only live: paper results that include trades
+    // the real configuration forbids measure a system nobody is allowed to run.
+    const instrument = instrumentVerdict(request.symbol, this.config);
+    check('instrument_permitted', instrument.permitted, instrument.detail);
 
     check(
       'direction_permitted',
