@@ -45,6 +45,18 @@ export interface DashboardData {
   /** Seconds since the last completed cycle. Absent when none has run yet. */
   cycleAgeSeconds?: number;
   signals: Signal[];
+  /**
+   * Which feeds are actually running.
+   *
+   * "Documents ingested: none" is the system's most common state and its most
+   * ambiguous one: a broken fetch and a feed set that publishes nothing about
+   * companies look identical from the funnel alone.
+   */
+  coverage: {
+    official: number;
+    news: number;
+    unknownIds: string[];
+  };
   events: MarketEvent[];
   orders: Order[];
   health: HealthReport[];
@@ -566,12 +578,32 @@ export function renderDashboard(data: DashboardData): string {
     latestFunnel && state.detail !== latestFunnel.summary
       ? `<p class="muted" style="margin:0 0 12px">${escapeHtml(latestFunnel.summary)}</p>`
       : '';
+  // The funnel says how many documents arrived. Only this says whether zero is
+  // the expected answer for what the system is pointed at.
+  const { official, news, unknownIds } = data.coverage;
+  const coverageNote = `<p class="note">
+    Watching <strong>${official}</strong> official feed(s) and <strong>${news}</strong> company-news feed(s).
+    ${
+      news === 0
+        ? '<span class="warn">Macro only</span> — central bank and statistics releases produce ' +
+          'market-wide events, not company catalysts, so a quiet funnel here is the feed set ' +
+          'rather than a fault. <span class="mono">ENABLED_SOURCES=all</span> turns the rest on.'
+        : 'Company news is on, so a quiet funnel means a quiet day.'
+    }
+    ${
+      unknownIds.length > 0
+        ? `<br><span class="neg">Not running:</span> <span class="mono">${escapeHtml(unknownIds.join(', '))}</span> — no feed has that id.`
+        : ''
+    }
+  </p>`;
+
   const funnelSection = latestFunnel
     ? `${funnelLead}
     <div class="scroll"><table class="funnel">
       <thead><tr><th>Stage</th><th>Count</th><th>Dropped</th></tr></thead>
       <tbody>${funnelStepRows(latestFunnel.steps)}</tbody>
     </table></div>
+    ${coverageNote}
     ${
       previousFunnels.length > 0
         ? `<details><summary>Previous cycles (${previousFunnels.length})</summary><ul>${previousFunnels
@@ -582,7 +614,7 @@ export function renderDashboard(data: DashboardData): string {
             .join('')}</ul></details>`
         : ''
     }`
-    : '<div class="empty">No cycle has run yet.</div>';
+    : `<div class="empty">No cycle has run yet.</div>${coverageNote}`;
 
   const outcomeEntries = Object.entries(data.outcomes.rates).sort(
     (a, b) => b[1].sampleSize - a[1].sampleSize,

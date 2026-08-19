@@ -94,6 +94,7 @@ function dataWith(url: string): DashboardData {
     },
     funnels: [],
     signals: [],
+    coverage: { official: 6, news: 0, unknownIds: [] },
     events: [
       {
         id: 'evt1',

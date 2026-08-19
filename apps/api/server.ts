@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import type { AppConfig } from '../../src/config/env.js';
 import { createLogger, type Logger } from '../../src/core/logger.js';
 import { redact } from '../../src/core/redact.js';
+import { selectFeedsDetailed } from '../../src/ingestion/feeds.js';
 import { metrics } from '../../src/monitoring/metrics.js';
 import { renderDashboard, type DashboardData } from '../dashboard/render.js';
 import type { TradingAgent } from '../worker/agent.js';
@@ -91,6 +92,7 @@ function buildDashboardData(agent: TradingAgent, config: AppConfig): DashboardDa
     funnels: agent.getFunnels(),
     ...(agent.cycleAgeSeconds() !== undefined ? { cycleAgeSeconds: agent.cycleAgeSeconds() } : {}),
     signals: agent.getSignals(),
+    coverage: feedCoverage(config),
     events: agent.getEvents(),
     orders: agent.getOrders(),
     health: agent.getHealth(),
@@ -109,6 +111,22 @@ function buildDashboardData(agent: TradingAgent, config: AppConfig): DashboardDa
     // dashboard refresh.
     unmeasurableEventTypes: unmeasurableFrom(agent),
     llmProvider: agent.getLlmProviderId(),
+  };
+}
+
+/**
+ * What the ingestion layer is actually pointed at.
+ *
+ * Recomputed per render rather than read from the running stack: this is a
+ * pure function of the configuration, and threading it through the agent would
+ * add a field whose only reader is a paragraph.
+ */
+function feedCoverage(config: AppConfig): DashboardData['coverage'] {
+  const { feeds, unknownIds } = selectFeedsDetailed(config.ENABLED_SOURCES);
+  return {
+    official: feeds.filter((f) => f.category === 'official').length,
+    news: feeds.filter((f) => f.category === 'news').length,
+    unknownIds,
   };
 }
 

@@ -5,7 +5,7 @@ import { createLogger, type Logger } from '../core/logger.js';
 import type { HealthReport, NormalizedDocument } from '../domain/types.js';
 import { Metrics, metrics as globalMetrics } from '../monitoring/metrics.js';
 import { Deduplicator } from './dedup.js';
-import { selectFeeds } from './feeds.js';
+import { ALL_FEEDS, selectFeedsDetailed } from './feeds.js';
 import { EcbAdapter } from './macro/ecb.js';
 import { FredAdapter } from './macro/fred.js';
 import { AlpacaMarketDataAdapter } from './market_data/alpaca.js';
@@ -53,9 +53,18 @@ export function buildIngestionStack(config: AppConfig, options: BuildOptions = {
   };
 
   // --- Documents ----------------------------------------------------------
-  const feeds = selectFeeds(config.ENABLED_SOURCES);
+  const { feeds, unknownIds } = selectFeedsDetailed(config.ENABLED_SOURCES);
   const officialFeeds = feeds.filter((f) => f.category === 'official');
   const newsFeeds = feeds.filter((f) => f.category === 'news');
+
+  if (unknownIds.length > 0) {
+    // Loud, because the symptom of a mistyped id is fewer documents, which
+    // is indistinguishable from a quiet news day.
+    log.warn(
+      { unknownIds, known: ALL_FEEDS.map((f) => f.id) },
+      'ENABLED_SOURCES names feeds that do not exist — they are NOT running',
+    );
+  }
 
   const documentSources: DocumentSource[] = [];
 
