@@ -162,3 +162,45 @@ describe('SEC user agent', () => {
     expect(config.userAgent).toBe('ai-market-agent ops@example.com');
   });
 });
+
+describe('minimum signal score', () => {
+  it('keeps the historical bar when nothing is configured', () => {
+    expect(loadConfig(empty).MIN_SIGNAL_SCORE).toBe(0.55);
+  });
+
+  it('can be lowered so a paper run actually produces fills to measure', () => {
+    expect(loadConfig(envFor({ MIN_SIGNAL_SCORE: '0.3' })).MIN_SIGNAL_SCORE).toBe(0.3);
+  });
+
+  it('rejects a bar outside [0,1], which is a typo rather than a loose setting', () => {
+    // 55 instead of 0.55 would silently refuse every order ever scored.
+    expect(() => loadConfig(envFor({ MIN_SIGNAL_SCORE: '55' }))).toThrow(ConfigError);
+    expect(() => loadConfig(envFor({ MIN_SIGNAL_SCORE: '-0.1' }))).toThrow(ConfigError);
+  });
+
+  it('refuses to carry a loosened paper bar into live mode', () => {
+    expect(() => loadConfig(envFor({ ...liveEnv, MIN_SIGNAL_SCORE: '0.3' }))).toThrow(ConfigError);
+    expect(loadConfig(envFor({ ...liveEnv, MIN_SIGNAL_SCORE: '0.6' })).MIN_SIGNAL_SCORE).toBe(0.6);
+  });
+});
+
+describe('tradable universe', () => {
+  it('is the union of the watchlist and the live allowlist', () => {
+    const config = loadConfig(envFor({ WATCHLIST: 'AAPL,MSFT', ALLOWED_ASSETS: 'MSFT,TSLA' }));
+    expect(config.tradableUniverse.sort()).toEqual(['AAPL', 'MSFT', 'TSLA']);
+  });
+
+  it('normalises case, so a lowercase entry still matches a model pick', () => {
+    expect(loadConfig(envFor({ WATCHLIST: 'aapl' })).tradableUniverse).toEqual(['AAPL']);
+  });
+});
+
+describe('model-chosen asset', () => {
+  it('is off by default: trading a proxy is an inference, not a named subject', () => {
+    expect(loadConfig(empty).ALLOW_MODEL_CHOSEN_ASSET).toBe(false);
+  });
+
+  it('can be enabled explicitly', () => {
+    expect(loadConfig(envFor({ ALLOW_MODEL_CHOSEN_ASSET: 'true' })).ALLOW_MODEL_CHOSEN_ASSET).toBe(true);
+  });
+});

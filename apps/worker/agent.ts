@@ -46,6 +46,7 @@ import { PositionManager } from '../../src/risk/position-manager.js';
 import type { RiskDecision } from '../../src/risk/types.js';
 import { EvidenceBook } from '../../src/strategy/evidence.js';
 import { observationVerdict } from '../../src/strategy/observation.js';
+import type { MarketContext } from '../../src/intelligence/llm/prompt.js';
 import { detectRegime, type MarketRegime } from '../../src/strategy/regime.js';
 import { SignalGenerator } from '../../src/strategy/signals/generator.js';
 import type { Signal } from '../../src/strategy/signals/types.js';
@@ -153,6 +154,9 @@ export class TradingAgent {
   /** Decisions whose horizon has passed but whose price is not published yet. */
   private pendingOutcomeCount = 0;
 
+  /** Symbols an order may be placed on — shown to the model, checked against. */
+  private readonly tradableUniverse: string[];
+
   private readonly discord: DiscordNotifier | undefined;
   private readonly approver: DiscordApprover | undefined;
   private readonly stateStore: AgentStateStore | undefined;
@@ -167,6 +171,7 @@ export class TradingAgent {
     this.clock = options.clock ?? systemClock;
     this.log = options.logger ?? createLogger('agent');
     this.stack = options.stack ?? buildIngestionStack(options.config);
+    this.tradableUniverse = options.config.tradableUniverse;
 
     this.llm =
       options.llm ??
@@ -250,7 +255,9 @@ export class TradingAgent {
       config: options.config,
       clock: this.clock,
       logger: this.log,
-      ...(options.minScoreForOrder !== undefined ? { minScore: options.minScoreForOrder } : {}),
+      // An explicit option still wins, so tests and callers can pin a bar; the
+      // configured value is what an operator actually turns.
+      minScore: options.minScoreForOrder ?? options.config.MIN_SIGNAL_SCORE,
     });
 
     if (restored) {
@@ -751,6 +758,58 @@ export class TradingAgent {
   }
 
   /**
+   * Quote, regime and prompt context for one symbol.
+   *
+   * Returns undefined when the feed has nothing for it. That is not an error:
+   * the model simply gets less to work with, and the Risk Engine refuses any
+   * resulting order for lack of a fresh price.
+   */
+  private async marketContextFor(symbol: string): Promise<
+    | {
+        context: MarketContext;
+        regime: MarketRegime | undefined;
+        price: number | undefined;
+        priceAgeSeconds: number;
+      }
+    | undefined
+  > {
+    try {
+      const quote = await this.stack.marketData.getQuote(symbol);
+      const price = quote.quote.last ?? quote.quote.bid;
+      let regime = this.regimeBySymbol.get(symbol);
+
+      if (!regime) {
+        try {
+          const history = await this.stack.marketData.getBars(symbol, '1Day', {
+            start: new Date(this.clock.nowMs() - 200 * 86_400_000),
+          });
+          regime = detectRegime(history.bars);
+          this.regimeBySymbol.set(symbol, regime);
+        } catch {
+          // No history: regime stays unknown, and the scorer treats an
+          // unknown regime as neutral rather than assuming one.
+        }
+      }
+
+      return {
+        context: {
+          symbol,
+          ...(price !== undefined ? { lastPrice: price } : {}),
+          currency: quote.quote.currency,
+          ...(regime ? { volatilityPct: regime.volatilityPct, regime: regime.trend } : {}),
+          dataNote: `${quote.quote.freshness.delayClass} feed, ${Math.round(quote.ageSeconds)}s old`,
+        },
+        regime,
+        price,
+        priceAgeSeconds: quote.ageSeconds,
+      };
+    } catch (err) {
+      this.log.debug({ symbol, error: (err as Error).message }, 'no market context for event');
+      return undefined;
+    }
+  }
+
+  /**
    * Analyse one event and, if everything allows it, act on it.
    *
    * Returns what the cycle needs to explain itself: whether the observation
@@ -762,48 +821,17 @@ export class TradingAgent {
     event: MarketEvent,
     documents: NormalizedDocument[],
   ): Promise<{ observationBlocked: boolean }> {
-    const symbol = event.tickers[0];
+    let symbol = event.tickers[0];
     const eventDocuments = documents.filter((doc) => event.documentIds.includes(doc.id));
 
     // Market context, when a price is available. Its absence is not fatal —
     // the model simply gets less to work with, and the Risk Engine will refuse
     // any resulting order for lack of a fresh price.
-    let context;
-    let regime: MarketRegime | undefined;
-    let priceAgeSeconds = Number.POSITIVE_INFINITY;
-    let price: number | undefined;
-
-    if (symbol) {
-      try {
-        const quote = await this.stack.marketData.getQuote(symbol);
-        price = quote.quote.last ?? quote.quote.bid;
-        priceAgeSeconds = quote.ageSeconds;
-        regime = this.regimeBySymbol.get(symbol);
-
-        if (!regime) {
-          try {
-            const history = await this.stack.marketData.getBars(symbol, '1Day', {
-              start: new Date(this.clock.nowMs() - 200 * 86_400_000),
-            });
-            regime = detectRegime(history.bars);
-            this.regimeBySymbol.set(symbol, regime);
-          } catch {
-            // No history: regime stays unknown, and the scorer treats an
-            // unknown regime as neutral rather than assuming one.
-          }
-        }
-
-        context = {
-          symbol,
-          ...(price !== undefined ? { lastPrice: price } : {}),
-          currency: quote.quote.currency,
-          ...(regime ? { volatilityPct: regime.volatilityPct, regime: regime.trend } : {}),
-          dataNote: `${quote.quote.freshness.delayClass} feed, ${Math.round(quote.ageSeconds)}s old`,
-        };
-      } catch (err) {
-        this.log.debug({ symbol, error: (err as Error).message }, 'no market context for event');
-      }
-    }
+    let market = symbol ? await this.marketContextFor(symbol) : undefined;
+    let context = market?.context;
+    let regime: MarketRegime | undefined = market?.regime;
+    let priceAgeSeconds = market?.priceAgeSeconds ?? Number.POSITIVE_INFINITY;
+    let price: number | undefined = market?.price;
 
     // From the cache refreshed at the top of this cycle rather than a fresh
     // read per event: the journal is read once, and every event in the cycle
@@ -816,6 +844,7 @@ export class TradingAgent {
       ...(context ? { context } : {}),
       ...(regime ? { regime } : {}),
       ...(historical ? { historicalHitRate: historical.hitRate, historicalSampleSize: historical.sampleSize } : {}),
+      ...(this.tradableUniverse.length > 0 ? { tradableUniverse: this.tradableUniverse } : {}),
       clock: this.clock,
       logger: this.log,
     });
@@ -840,6 +869,42 @@ export class TradingAgent {
       `${signal.action} ${signal.asset} · score ${signal.score.toFixed(3)} · ${signal.catalyst.slice(0, 100)}`,
     );
 
+    // The event named no company, but the model named one it can reach. A
+    // sanctions or rate story carries no ticker, so without this the analysis
+    // above — already paid for, already journalled — could never become an
+    // order for want of a symbol to price.
+    //
+    // What the model chose is checked against the operator's own universe
+    // before anything else happens: it selects from that list, it does not
+    // extend it. Everything downstream is unchanged — the quote it now fetches
+    // must still be fresh, and the Risk Engine still decides.
+    if (
+      !symbol &&
+      this.config.ALLOW_MODEL_CHOSEN_ASSET &&
+      (signal.action === 'BUY' || signal.action === 'SELL')
+    ) {
+      const proposed = signal.asset.toUpperCase();
+      if (this.tradableUniverse.includes(proposed)) {
+        symbol = proposed;
+        market = await this.marketContextFor(proposed);
+        context = market?.context;
+        regime = market?.regime;
+        priceAgeSeconds = market?.priceAgeSeconds ?? Number.POSITIVE_INFINITY;
+        price = market?.price;
+        this.activity.info(
+          'proxy',
+          `${event.type} named no ticker — trading the model's pick ${proposed}`,
+        );
+      } else if (proposed !== 'NONE') {
+        // Worth a line rather than silence: it is the difference between "the
+        // model declined" and "the model picked something you never listed".
+        this.activity.warn(
+          'proxy',
+          `${proposed} is not in the tradable universe — no order for ${event.type}`,
+        );
+      }
+    }
+
     // --- Risk ------------------------------------------------------------
     let riskDecision: RiskDecision | undefined;
     let order: Order | undefined;
@@ -853,26 +918,32 @@ export class TradingAgent {
       this.activity.warn('observation', `${signal.action} ${signal.asset} not placed — ${observation.reason}`);
     }
 
+    // Bound to constants so the checks below actually narrow: the symbol may
+    // have been replaced by the model's pick a few lines up, and a `let` the
+    // compiler cannot follow would force a non-null assertion at every use.
+    const tradeSymbol = symbol;
+    const tradePrice = price;
+
     const tradeable =
       observation.trades &&
       (signal.action === 'BUY' || signal.action === 'SELL') &&
-      symbol !== undefined &&
-      price !== undefined;
+      tradeSymbol !== undefined &&
+      tradePrice !== undefined;
 
     if (tradeable && !this.state.halted) {
       // Without a group the engine skips the correlated-exposure check
       // entirely — the limit was configured, displayed, and inert.
-      const correlationGroup = this.correlationGroupFor(symbol);
+      const correlationGroup = this.correlationGroupFor(tradeSymbol);
       riskDecision = this.riskEngine.evaluate(
         {
-          symbol,
+          symbol: tradeSymbol,
           action: signal.action,
           score: signal.score,
-          price: price!,
+          price: tradePrice,
           priceAgeSeconds,
           ...(regime ? { volatilityPct: regime.volatilityPct } : {}),
           ...(correlationGroup ? { correlationGroup } : {}),
-          clientOrderId: sha256(`${signal.id}|${symbol}`).slice(0, 24),
+          clientOrderId: sha256(`${signal.id}|${tradeSymbol}`).slice(0, 24),
         },
         this.portfolio.snapshot(),
       );
@@ -898,7 +969,7 @@ export class TradingAgent {
             side: riskDecision.side,
             quantity: riskDecision.quantity,
             type: 'market',
-            clientOrderId: sha256(`${signal.id}|${symbol}`).slice(0, 24),
+            clientOrderId: sha256(`${signal.id}|${tradeSymbol}`).slice(0, 24),
             reason: `signal ${signal.id}: ${signal.catalyst}`.slice(0, 200),
           });
           this.state.ordersPlaced += 1;
@@ -906,7 +977,7 @@ export class TradingAgent {
           if (riskDecision.side === 'buy' && riskDecision.stopPrice !== undefined) {
             const plan = this.positions.track({
               symbol: riskDecision.symbol,
-              entryPrice: order.filledPrice ?? price!,
+              entryPrice: order.filledPrice ?? tradePrice,
               stopPrice: riskDecision.stopPrice,
               ...(signal.expectedHorizon ? { horizon: signal.expectedHorizon } : {}),
               signalId: signal.id,

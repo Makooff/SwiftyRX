@@ -82,6 +82,23 @@ const rawSchema = z.object({
   /** Market data older than this is treated as unusable -> DO NOT TRADE. */
   MAX_QUOTE_STALENESS_SECONDS: num(120),
 
+  /**
+   * Composite score a signal must reach before the Risk Engine will consider
+   * it at all.
+   *
+   * This is the bar that decides how much of the funnel ever reaches an order,
+   * and it was previously a constant nobody could reach without editing the
+   * Risk Engine. It is exposed because the right value is an empirical
+   * question: a paper run that never places an order measures nothing, and the
+   * only way to learn where the bar belongs is to run it lower and let the
+   * journal score the decisions.
+   *
+   * The default is unchanged at 0.55. Lowering it does not weaken any other
+   * limit — position caps, daily loss, exposure and staleness all still apply
+   * to every order that gets through.
+   */
+  MIN_SIGNAL_SCORE: num(0.55),
+
   // ---- Evidence -----------------------------------------------------------
   /**
    * Where `npm run study --out` writes what the event study found, and where
@@ -194,6 +211,28 @@ const rawSchema = z.object({
    * rather than a switch.
    */
   OBSERVATION_ANALYSIS_PER_CYCLE: num(3),
+
+  /**
+   * May a signal be traded on the asset the *model* named, when the event
+   * itself carried no ticker?
+   *
+   * Detection extracts tickers from the text. A macro or thematic story —
+   * sanctions, a rate decision, a supply-chain shock — usually names no
+   * company at all, so `event.tickers` is empty and the analysis, however
+   * good, could never reach an order: there was no symbol to price or trade.
+   *
+   * With this on, the model is shown the tradable universe and its chosen
+   * asset becomes the symbol — but only if that asset is *in* that universe.
+   * The model cannot invent an instrument to trade; it can only pick one the
+   * operator already listed. Every other limit is untouched: the quote must
+   * still be fresh, the score must still clear MIN_SIGNAL_SCORE, and the Risk
+   * Engine still sizes the order and can still refuse it.
+   *
+   * Off by default, because it trades on an inference — this theme moves that
+   * proxy — rather than on a named subject. That is a weaker claim, and it
+   * belongs in a paper run before it belongs anywhere else.
+   */
+  ALLOW_MODEL_CHOSEN_ASSET: bool(false),
 });
 
 export const LIVE_CONFIRMATION_PHRASE = 'I_UNDERSTAND_REAL_MONEY_RISK';
@@ -205,6 +244,14 @@ export type AppConfig = z.infer<typeof rawSchema> & {
   /** Starting capital for the active mode: live uses real money, others do not. */
   initialCapital: number;
   userAgent: string;
+  /**
+   * Every symbol the operator has listed, in one place.
+   *
+   * The watchlist says what to follow and the allowlist says what live may
+   * touch; both are things the operator chose to name. This is their union,
+   * and it is the only set a model-chosen asset is ever matched against.
+   */
+  tradableUniverse: string[];
 };
 
 export class ConfigError extends Error {
@@ -269,6 +316,17 @@ function assertSafetyInvariants(cfg: z.infer<typeof rawSchema>): string[] {
   }
   if (cfg.MAX_QUOTE_STALENESS_SECONDS <= 0) {
     problems.push('MAX_QUOTE_STALENESS_SECONDS must be > 0.');
+  }
+  // A score is always in [0,1], so a bar outside it is not a loose setting but
+  // a typo: 55 instead of 0.55 would silently refuse every order ever scored.
+  if (cfg.MIN_SIGNAL_SCORE < 0 || cfg.MIN_SIGNAL_SCORE > 1) {
+    problems.push(`MIN_SIGNAL_SCORE must be between 0 and 1 (got ${cfg.MIN_SIGNAL_SCORE}).`);
+  }
+  if (cfg.MODE === 'live' && cfg.MIN_SIGNAL_SCORE < 0.5) {
+    problems.push(
+      `MODE=live requires MIN_SIGNAL_SCORE >= 0.5 (got ${cfg.MIN_SIGNAL_SCORE}). ` +
+        'A bar lowered to see paper fills is not a bar to trade real money behind.',
+    );
   }
 
   // Publishing a live portfolio by forgetting one variable is exactly the
@@ -336,6 +394,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     initialCapital: cfg.MODE === 'live' ? cfg.LIVE_CAPITAL_EUR : cfg.PAPER_CAPITAL_EUR,
     // Format expected by SEC EDGAR: "App Name contact@domain".
     userAgent: `${cfg.USER_AGENT_APP_NAME} ${contact}`,
+    tradableUniverse: [...new Set([...cfg.WATCHLIST, ...cfg.ALLOWED_ASSETS].map((s) => s.toUpperCase()))],
   };
 }
 
