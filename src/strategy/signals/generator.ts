@@ -28,6 +28,12 @@ export interface GenerateOptions {
   clock?: Clock;
   logger?: Logger;
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /**
+   * Symbols an order could actually be placed on. Passed through to the prompt
+   * so the model expresses a ticker-less story as a view on something
+   * tradable instead of on "NONE".
+   */
+  tradableUniverse?: string[];
 }
 
 export interface GenerationResult {
@@ -63,7 +69,9 @@ export class SignalGenerator {
       content: doc.content.slice(0, 3000),
     }));
 
-    const task = buildSignalTask(event, documents, options.context);
+    const task = buildSignalTask(event, documents, options.context, {
+      ...(options.tradableUniverse ? { tradableUniverse: options.tradableUniverse } : {}),
+    });
 
     let result;
     try {

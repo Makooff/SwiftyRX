@@ -482,3 +482,87 @@ describe('dashboard API', () => {
     expect(results.every((code) => code === 404)).toBe(true);
   });
 });
+
+describe('TradingAgent — an event that names no ticker', () => {
+  /**
+   * A macro, policy or sanctions story carries no company name, so detection
+   * extracts no ticker. The analysis is still paid for and still journalled;
+   * the question these tests pin down is whether it can reach an order, and on
+   * what.
+   */
+  const macroDocuments = () => [
+    doc(
+      'outlet_a',
+      'Fed raises interest rates by 50 basis points',
+      'The central bank raised its policy rate, citing inflation.',
+    ),
+    doc(
+      'sec_edgar',
+      'Rate decision notice',
+      'The policy rate was increased by 50 basis points.',
+      { form: '8-K', items: ['8.01'] },
+    ),
+  ];
+
+  /** The model reads a ticker-less story and names a symbol it can reach. */
+  const proxyHypothesis = { ...bullishHypothesis, asset: 'AAPL', confidence: 0.8 };
+
+  it('places no order by default, because the pick is an inference nobody opted into', async () => {
+    const { agent } = await agentWith(macroDocuments(), llmReturning(proxyHypothesis));
+    await agent.runCycle();
+    // The analysis still happened and was still journalled — only the order is
+    // withheld. Asserting that keeps this from passing for the wrong reason.
+    expect(agent.getState().signalsGenerated).toBeGreaterThan(0);
+    expect(agent.getState().ordersPlaced).toBe(0);
+  });
+
+  it("trades the model's pick when the operator turns it on", async () => {
+    const { agent, journalPath } = await agentWith(macroDocuments(), llmReturning(proxyHypothesis), {
+      ALLOW_MODEL_CHOSEN_ASSET: 'true',
+      MIN_SIGNAL_SCORE: '0.3',
+    });
+    await agent.runCycle();
+
+    expect(agent.getState().ordersPlaced).toBe(1);
+    expect(agent.portfolio.openPositions[0]?.symbol).toBe('AAPL');
+
+    const entry = JSON.parse((await readFile(journalPath, 'utf8')).trim().split('\n')[0]!);
+    expect(entry.asset).toBe('AAPL');
+  });
+
+  it('refuses a pick outside the universe: the model selects, it does not extend', async () => {
+    // TSLA is plausible and untradeable here — it is not on the watchlist.
+    const { agent } = await agentWith(
+      macroDocuments(),
+      llmReturning({ ...proxyHypothesis, asset: 'TSLA' }),
+      { ALLOW_MODEL_CHOSEN_ASSET: 'true', MIN_SIGNAL_SCORE: '0.3' },
+    );
+    await agent.runCycle();
+    expect(agent.getState().signalsGenerated).toBeGreaterThan(0);
+    expect(agent.getState().ordersPlaced).toBe(0);
+  });
+
+  it('still refuses a pick that cannot clear the score bar', async () => {
+    // The proxy path changes which symbol is considered, never whether the
+    // score has to be earned.
+    const { agent } = await agentWith(macroDocuments(), llmReturning(proxyHypothesis), {
+      ALLOW_MODEL_CHOSEN_ASSET: 'true',
+      MIN_SIGNAL_SCORE: '0.99',
+    });
+    await agent.runCycle();
+    expect(agent.getState().signalsGenerated).toBeGreaterThan(0);
+    expect(agent.getState().ordersRejectedByRisk).toBeGreaterThan(0);
+    expect(agent.getState().ordersPlaced).toBe(0);
+  });
+
+  it('does not act on a WATCH, however the asset field is filled', async () => {
+    const { agent } = await agentWith(
+      macroDocuments(),
+      llmReturning({ ...proxyHypothesis, action: 'WATCH' }),
+      { ALLOW_MODEL_CHOSEN_ASSET: 'true', MIN_SIGNAL_SCORE: '0.1' },
+    );
+    await agent.runCycle();
+    expect(agent.getState().signalsGenerated).toBeGreaterThan(0);
+    expect(agent.getState().ordersPlaced).toBe(0);
+  });
+});

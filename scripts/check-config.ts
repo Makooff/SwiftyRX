@@ -42,6 +42,13 @@ try {
   console.log(`  max single trade risk     ${config.MAX_SINGLE_TRADE_RISK_PERCENT}%`);
   console.log(`  max correlated exposure   ${config.MAX_CORRELATED_EXPOSURE_PERCENT}%`);
   console.log(`  quote staleness limit     ${config.MAX_QUOTE_STALENESS_SECONDS}s`);
+  console.log(`  min signal score          ${config.MIN_SIGNAL_SCORE}`);
+
+  console.log('\n--- what may be traded ---');
+  console.log(`  tradable universe         ${config.tradableUniverse.join(', ') || '(none)'}`);
+  console.log(
+    `  model may pick the asset  ${config.ALLOW_MODEL_CHOSEN_ASSET ? 'yes — from that universe only' : 'no'}`,
+  );
 
   console.log('\n--- credentials ---');
   console.log(`  CONTACT_EMAIL (SEC)       ${config.CONTACT_EMAIL ? config.CONTACT_EMAIL : 'not set'}`);

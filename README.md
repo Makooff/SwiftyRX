@@ -160,6 +160,28 @@ The safety-critical settings:
 | `MAX_TRADES_PER_DAY` | `10` | Runaway protection |
 | `CONSECUTIVE_LOSS_COOLDOWN_MINUTES` | `120` | Forced pause after repeated losses |
 | `MAX_QUOTE_STALENESS_SECONDS` | `120` | Past this, refuse to trade |
+| `MIN_SIGNAL_SCORE` | `0.55` | Composite score a signal must reach to be considered at all |
+| `ALLOW_MODEL_CHOSEN_ASSET` | `false` | Let the model pick the symbol when the event names no ticker |
+
+### When the agent analyses but never trades
+
+Two settings decide whether a good analysis can become an order at all, and both
+are the usual reason a paper run fills its journal without ever filling a trade.
+
+`MIN_SIGNAL_SCORE` is the bar. The dashboard funnel prints each refused score
+against it, so start there. The right value is an empirical question rather than
+a safety one — a paper run that never fills measures nothing — and `0.30`–`0.35`
+is a reasonable place to begin. Lowering it weakens no other limit, and live mode
+refuses to boot below `0.5`.
+
+`ALLOW_MODEL_CHOSEN_ASSET` covers the other case. Detection extracts tickers from
+the text, so a macro, policy or sanctions story carries none, and the analysis
+has no symbol to price or trade however good it is. With this on, the model is
+shown `WATCHLIST` + `ALLOWED_ASSETS` and its pick becomes the symbol — but only
+if the pick is already in that list. The model selects from your universe; it
+cannot extend it, and the Risk Engine still decides.
+
+`npm run config:check` prints both, along with the universe in force.
 
 `CONTACT_EMAIL` is required for any SEC request — the SEC rejects requests whose
 `User-Agent` lacks a contact address, and the adapter refuses to send one without it rather

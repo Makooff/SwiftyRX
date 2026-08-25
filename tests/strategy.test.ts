@@ -111,6 +111,36 @@ describe('prompt construction', () => {
     const task = buildSignalTask(event({ verification: { ...event().verification, status: 'unverified' } }), []);
     expect(task).toContain('verification status: unverified');
   });
+
+  it('lists the tradable universe and names it as the limit of what can be acted on', () => {
+    const task = buildSignalTask(event(), [], undefined, { tradableUniverse: ['AAPL', 'MSFT'] });
+    expect(task).toContain('AAPL, MSFT');
+    expect(task).toMatch(/only symbols this system can place an order on/i);
+  });
+
+  it('asks for a symbol from that universe when the event names no company', () => {
+    const task = buildSignalTask(event(), [], undefined, { tradableUniverse: ['AAPL'] });
+    expect(task).toMatch(/names no company directly/i);
+    // "NONE" must read as "nothing here is connected", never as "low conviction".
+    expect(task).toMatch(/do not use it to express low conviction/i);
+  });
+
+  it('keeps the plain abstain wording when no universe is configured', () => {
+    const task = buildSignalTask(event(), []);
+    expect(task).not.toMatch(/Tradable universe/);
+    expect(task).toMatch(/return action "WATCH" or "HOLD"/);
+  });
+
+  it('tells the model that low confidence beats abstaining, since only a call can be scored', () => {
+    // A WATCH cannot be measured a horizon later; a 0.3-confidence BUY can.
+    expect(SIGNAL_SYSTEM_PROMPT).toMatch(/not automatically a reason to abstain/i);
+    expect(SIGNAL_SYSTEM_PROMPT).toMatch(/Reserve WATCH and HOLD/);
+  });
+
+  it('still tells the model its confidence must be calibrated, not enthusiastic', () => {
+    // Loosening the abstain reflex must not become licence to inflate.
+    expect(SIGNAL_SYSTEM_PROMPT).toMatch(/overconfidence is not/i);
+  });
 });
 
 // ---------------------------------------------------------------------------
