@@ -128,6 +128,7 @@ docker compose up -d      # PostgreSQL + Redis
 | `npm run correlations` | Which of the names traded are the same bet? Writes the groups the correlated-exposure limit needs. `-- --days 500 --threshold 0.8 --out`. Needs no LLM |
 | `npm run snapshot` | One text file with everything needed to diagnose a running agent from outside it |
 | `npm run dashboard` | Dashboard only, against a fresh agent state |
+| `npm run why` | Where each journalled decision actually stopped, counted — the answer to "it analysed everything and traded nothing". `-- --last 20`. Needs no LLM |
 | `npm run doctor` | What works, what is degraded, what blocks trading — with the fix and the URL for each. Exits non-zero only when something blocks trading |
 | `npm run config:check` | Effective configuration and safety posture; never prints secrets |
 | `npm run sources:check` | Live health probe of every configured source; non-zero exit if any is broken |
@@ -182,6 +183,20 @@ if the pick is already in that list. The model selects from your universe; it
 cannot extend it, and the Risk Engine still decides.
 
 `npm run config:check` prints both, along with the universe in force.
+
+`npm run why` answers the same question from the other end — it reads the
+decision journal and counts where each decision actually stopped, so you tune
+the gate that fired rather than the one you assumed did:
+
+```
+--- where each decision stopped ---
+  model named no asset (WATCH/HOLD + NONE)   5   50%
+  risk refused: min_score                    3   30%
+  traded                                     1   10%
+```
+
+It costs nothing to run: no tokens, no orders, no network. Add `--last 20` for
+the individual decisions and their headlines.
 
 `CONTACT_EMAIL` is required for any SEC request — the SEC rejects requests whose
 `User-Agent` lacks a contact address, and the adapter refuses to send one without it rather

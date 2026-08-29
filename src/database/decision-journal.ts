@@ -115,6 +115,45 @@ export function isDirectional(action: Signal['action']): boolean {
   return action === 'BUY' || action === 'SELL';
 }
 
+/**
+ * The one gate that stopped a journalled decision from becoming an order.
+ *
+ * A run that analyses events and journals decisions without ever trading looks
+ * from the outside exactly like a broken one. It is usually neither: some gate
+ * refused every candidate and said so at the time. This reads that back.
+ *
+ * The order of the checks is the point. A decision can fail several gates at
+ * once, and only the earliest is worth reporting — saying "score too low"
+ * about a WATCH would send an operator to tune a threshold that was never
+ * consulted, and they would tune it forever without effect.
+ */
+export function blockingGate(entry: JournalEntry): string {
+  if (entry.order) return 'traded';
+
+  if (!isDirectional(entry.signal)) {
+    return entry.asset.toUpperCase() === 'NONE'
+      ? 'model named no asset (WATCH/HOLD + NONE)'
+      : `model declined (${entry.signal})`;
+  }
+
+  if (entry.riskDecision === null) {
+    // Directional, but the Risk Engine never saw it: either no symbol was
+    // resolved for the event, or no quote came back for the one that was.
+    return entry.priceAtSignal === null
+      ? 'no price — no symbol resolved, or the quote failed'
+      : 'never evaluated (observation gate, or halted)';
+  }
+
+  if (entry.riskDecision.verdict !== 'approved') {
+    const rules = entry.riskDecision.rejections;
+    return rules.length > 0 ? `risk refused: ${rules.join(', ')}` : 'risk refused';
+  }
+
+  // Approved and sized, but no order line. The broker call threw, and that is
+  // a fault rather than a decision — worth naming as its own outcome.
+  return 'approved but no order recorded';
+}
+
 /** When a decision's horizon has run out and its outcome can be looked up. */
 export function outcomeDueAt(entry: JournalEntry): Date {
   return new Date(
