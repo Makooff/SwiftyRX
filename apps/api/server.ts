@@ -50,6 +50,22 @@ function settingsRows(config: AppConfig): DashboardData['settings'] {
     { label: 'Max trades/day', value: String(config.MAX_TRADES_PER_DAY) },
     { label: 'Loss cooldown', value: `${config.CONSECUTIVE_LOSS_COOLDOWN_MINUTES} min`, note: 'after consecutive losses' },
     { label: 'Quote staleness', value: `${config.MAX_QUOTE_STALENESS_SECONDS}s`, note: 'past this: do not trade' },
+    // The two settings that decide how much of the funnel can ever reach an
+    // order. They belong beside the risk limits because that is where an
+    // operator looks when nothing trades — and reading them from a phone is
+    // the fastest way to tell a deployed change from a configured one.
+    {
+      label: 'Min signal score',
+      value: String(config.MIN_SIGNAL_SCORE),
+      note: 'below this: no order is considered',
+    },
+    {
+      label: 'Model may pick the asset',
+      value: config.ALLOW_MODEL_CHOSEN_ASSET ? 'yes' : 'off',
+      note: config.ALLOW_MODEL_CHOSEN_ASSET
+        ? `from the universe only: ${config.tradableUniverse.join(', ') || '(empty)'}`
+        : 'an event with no ticker cannot trade',
+    },
     { label: 'Short selling', value: config.ALLOW_SHORT_SELLING ? 'allowed' : 'off' },
     {
       label: 'Crypto',

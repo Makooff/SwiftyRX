@@ -462,6 +462,51 @@ describe('dashboard API', () => {
     expect(response.body).not.toContain('sk-ant-secret-value-12345');
   });
 
+  it('shows the two settings that decide whether anything can trade', async () => {
+    // Read from a phone, these answer "is my change actually deployed?" —
+    // which the funnel alone cannot, because a refusal looks the same either
+    // way.
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    const config = loadConfig({
+      WATCHLIST: 'AAPL,MSFT',
+      MIN_SIGNAL_SCORE: '0.3',
+      ALLOW_MODEL_CHOSEN_ASSET: 'true',
+    });
+    const server = createApiServer({ agent, config });
+
+    const body = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', async () => {
+        const address = server.address() as { port: number };
+        const res = await fetch(`http://127.0.0.1:${address.port}/`);
+        resolve(await res.text());
+        server.close();
+      });
+    });
+
+    expect(body).toContain('Min signal score');
+    expect(body).toContain('0.3');
+    expect(body).toContain('Model may pick the asset');
+    // The universe is shown with it: a pick outside it is refused, so the
+    // setting alone does not say what the model may actually choose.
+    expect(body).toContain('AAPL, MSFT');
+  });
+
+  it('says plainly when the model may not pick the asset', async () => {
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    const server = createApiServer({ agent, config: loadConfig({}) });
+
+    const body = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', async () => {
+        const address = server.address() as { port: number };
+        const res = await fetch(`http://127.0.0.1:${address.port}/`);
+        resolve(await res.text());
+        server.close();
+      });
+    });
+
+    expect(body).toContain('an event with no ticker cannot trade');
+  });
+
   it('exposes no endpoint that can place or cancel an order', async () => {
     const { agent } = await agentWith([], llmReturning(bullishHypothesis));
     const server = createApiServer({ agent, config: loadConfig({}) });
