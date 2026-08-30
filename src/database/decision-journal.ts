@@ -127,31 +127,127 @@ export function isDirectional(action: Signal['action']): boolean {
  * about a WATCH would send an operator to tune a threshold that was never
  * consulted, and they would tune it forever without effect.
  */
-export function blockingGate(entry: JournalEntry): string {
-  if (entry.order) return 'traded';
+export type BlockingGateCode =
+  | 'traded'
+  | 'no_asset'
+  | 'model_declined'
+  | 'no_price'
+  | 'never_evaluated'
+  | 'risk_refused'
+  | 'approved_no_order';
+
+export interface BlockingGateVerdict {
+  code: BlockingGateCode;
+  /** The rules the Risk Engine fired, when it refused. */
+  rules: string[];
+  /** The action the model chose, when it declined to take a side. */
+  action?: JournalEntry['signal'];
+}
+
+/**
+ * The ordering itself, decided once so every rendering of it agrees.
+ *
+ * English and French below both read this, rather than each re-deciding which
+ * gate to blame. Two copies of this sequence would drift, and a drifted copy
+ * is worse than no translation: it would send an operator to the wrong knob
+ * while sounding just as certain.
+ */
+export function blockingGateOf(entry: JournalEntry): BlockingGateVerdict {
+  if (entry.order) return { code: 'traded', rules: [] };
 
   if (!isDirectional(entry.signal)) {
     return entry.asset.toUpperCase() === 'NONE'
-      ? 'model named no asset (WATCH/HOLD + NONE)'
-      : `model declined (${entry.signal})`;
+      ? { code: 'no_asset', rules: [] }
+      : { code: 'model_declined', rules: [], action: entry.signal };
   }
 
   if (entry.riskDecision === null) {
     // Directional, but the Risk Engine never saw it: either no symbol was
     // resolved for the event, or no quote came back for the one that was.
     return entry.priceAtSignal === null
-      ? 'no price — no symbol resolved, or the quote failed'
-      : 'never evaluated (observation gate, or halted)';
+      ? { code: 'no_price', rules: [] }
+      : { code: 'never_evaluated', rules: [] };
   }
 
   if (entry.riskDecision.verdict !== 'approved') {
-    const rules = entry.riskDecision.rejections;
-    return rules.length > 0 ? `risk refused: ${rules.join(', ')}` : 'risk refused';
+    return { code: 'risk_refused', rules: entry.riskDecision.rejections };
   }
 
   // Approved and sized, but no order line. The broker call threw, and that is
   // a fault rather than a decision — worth naming as its own outcome.
-  return 'approved but no order recorded';
+  return { code: 'approved_no_order', rules: [] };
+}
+
+export function blockingGate(entry: JournalEntry): string {
+  const verdict = blockingGateOf(entry);
+  switch (verdict.code) {
+    case 'traded':
+      return 'traded';
+    case 'no_asset':
+      return 'model named no asset (WATCH/HOLD + NONE)';
+    case 'model_declined':
+      return `model declined (${verdict.action})`;
+    case 'no_price':
+      return 'no price — no symbol resolved, or the quote failed';
+    case 'never_evaluated':
+      return 'never evaluated (observation gate, or halted)';
+    case 'risk_refused':
+      return verdict.rules.length > 0 ? `risk refused: ${verdict.rules.join(', ')}` : 'risk refused';
+    case 'approved_no_order':
+      return 'approved but no order recorded';
+  }
+}
+
+/** French for the rules the Risk Engine can fire. Unknown rules pass through. */
+const RISK_RULES_FR: Record<string, string> = {
+  min_score: 'note trop faible',
+  max_position: 'position trop grosse',
+  max_daily_loss: 'perte du jour atteinte',
+  max_trades_per_day: 'nombre de trades du jour atteint',
+  max_portfolio_exposure: 'exposition totale trop élevée',
+  max_correlated_exposure: 'trop exposé à des valeurs qui bougent ensemble',
+  price_freshness: 'prix trop vieux',
+  price_sane: 'prix aberrant',
+  actionable_direction: 'pas de sens d’achat ou de vente',
+  direction_permitted: 'vente à découvert non autorisée',
+  instrument_permitted: 'type d’actif non autorisé',
+  asset_allowlist: 'valeur absente de la liste autorisée',
+  duplicate_order: 'ordre déjà passé',
+  trading_mode: 'mode de trading incompatible',
+  min_notional: 'montant trop petit — les frais domineraient',
+  consecutive_losses: 'pause après plusieurs pertes d’affilée',
+};
+
+/**
+ * The same verdict, in plain French.
+ *
+ * Written for somebody deciding what to change, so each line names the cause
+ * rather than the component: "no ticker in the news" is actionable, "the
+ * entity resolver returned undefined" is not.
+ */
+export function blockingGateFr(entry: JournalEntry): string {
+  const verdict = blockingGateOf(entry);
+  switch (verdict.code) {
+    case 'traded':
+      return 'ordre passé';
+    case 'no_asset':
+      return 'aucune action identifiable dans la nouvelle';
+    case 'model_declined':
+      return 'le modèle a préféré ne rien faire';
+    case 'no_price':
+      return 'pas de prix disponible pour cette valeur';
+    case 'never_evaluated':
+      return 'source encore en observation, ou trading en pause';
+    case 'risk_refused': {
+      const rules = verdict.rules.map((rule) => RISK_RULES_FR[rule] ?? rule);
+      return rules.length > 0
+        ? `refusé par le contrôle des risques : ${rules.join(', ')}`
+        : 'refusé par le contrôle des risques';
+    }
+    case 'approved_no_order':
+      // Not a refusal: everything said yes and the order still did not exist.
+      return 'accepté mais l’ordre n’est jamais parti — anomalie à signaler';
+  }
 }
 
 /** When a decision's horizon has run out and its outcome can be looked up. */

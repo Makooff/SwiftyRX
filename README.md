@@ -117,6 +117,24 @@ Optional local infrastructure (nothing uses it yet — state and the journal are
 docker compose up -d      # PostgreSQL + Redis
 ```
 
+### Démarrage sur Windows
+
+Double-clique **`Lancer-SwiftyRX.bat`**. Il vérifie Node.js, récupère la
+dernière version, installe ce qu'il faut, lance le diagnostic, démarre l'agent
+et ouvre le tableau de bord sur <http://127.0.0.1:3000>.
+
+Au tout premier lancement il crée ton fichier `.env` et l'ouvre dans le
+Bloc-notes : remplis `ANTHROPIC_API_KEY`, `LLM_PROVIDER=anthropic` et
+`CONTACT_EMAIL`, enregistre, puis relance. Sans ces trois lignes l'agent lit les
+nouvelles mais n'analyse rien.
+
+**`Arreter-SwiftyRX.bat`** l'arrête. Le portefeuille et l'historique sont dans
+`data/` et sont repris au démarrage suivant.
+
+Le tableau de bord parle français là où ça compte : un bandeau « Où en est le
+bot » en trois phrases, et le tunnel du dernier cycle avec la raison de chaque
+abandon. Le reste de la page (chiffres, positions, réglages) reste en anglais.
+
 ### Commands
 
 | Command | What it does |

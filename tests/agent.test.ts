@@ -491,6 +491,28 @@ describe('dashboard API', () => {
     expect(body).toContain('AAPL, MSFT');
   });
 
+  it('opens with a French briefing rather than the funnel table', async () => {
+    // The person reading this did not build the pipeline: the first thing on
+    // the page has to be a sentence, not a stage name.
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    const server = createApiServer({ agent, config: loadConfig({}) });
+
+    const body = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', async () => {
+        const address = server.address() as { port: number };
+        const res = await fetch(`http://127.0.0.1:${address.port}/`);
+        resolve(await res.text());
+        server.close();
+      });
+    });
+
+    expect(body).toContain('Où en est le bot');
+    expect(body).toContain('Aucun cycle n’a encore tourné');
+    // The English stage names must not survive into the funnel table.
+    expect(body).not.toContain('Passed analysis gate');
+    expect(body).not.toContain('<th>Stage</th>');
+  });
+
   it('says plainly when the model may not pick the asset', async () => {
     const { agent } = await agentWith([], llmReturning(bullishHypothesis));
     const server = createApiServer({ agent, config: loadConfig({}) });

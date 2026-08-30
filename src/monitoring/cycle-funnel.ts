@@ -32,6 +32,63 @@ export const FUNNEL_STAGE_LABELS: Record<FunnelStage, string> = {
   orders: 'Orders placed',
 };
 
+/**
+ * The same stages, named for somebody who did not build this.
+ *
+ * The operator reading the dashboard is not always the person who wrote the
+ * pipeline, and "passed the analysis gate" describes the code rather than what
+ * happened. These say what happened.
+ *
+ * Kept beside the English labels rather than replacing them: the stored
+ * `summary`, the JSON diagnostic and the logs stay in one language, so a
+ * saved cycle never comes back half-translated.
+ */
+export const FUNNEL_STAGE_LABELS_FR: Record<FunnelStage, string> = {
+  ingest: 'Articles récupérés',
+  events: 'Événements détectés',
+  analysis_gate: 'Jugés dignes d’analyse',
+  evidence_gate: 'Non écartés par les mesures passées',
+  analysed: 'Analysés',
+  signals: 'Avis produits',
+  risk: 'Acceptés par le contrôle des risques',
+  orders: 'Ordres passés',
+};
+
+/**
+ * French for the drop reasons the pipeline actually emits.
+ *
+ * Two of them carry a configured number, so they are matched by shape rather
+ * than by string. Anything unrecognised is returned untouched: a reason
+ * invented downstream should reach the operator as it was written rather than
+ * be silently dropped or mistranslated.
+ */
+export function funnelReasonFr(reason: string): string {
+  const fixed: Record<string, string> = {
+    contradicted: 'démentis',
+    unclassified: 'non classables',
+    'detection failed': 'échec de la détection',
+    'ingestion failed': 'échec de la récupération',
+    // Not "refused by the risk check": this reason is only ever shown against
+    // the risk stage, whose own label already says that, and the pair read
+    // together as one sentence saying the same thing twice.
+    'risk rejected': 'au-delà des limites de risque',
+    'observation only': 'source encore en observation',
+    'not tradeable or halted': 'pas d’action identifiable, ou trading en pause',
+    'approval rejected': 'validation refusée',
+    'observation budget spent this cycle': 'budget d’observation épuisé pour ce cycle',
+    'not processed — top 5 only': 'non traités — 5 par cycle au maximum',
+  };
+  if (fixed[reason]) return fixed[reason];
+
+  const materiality = /^materiality below (.+)$/.exec(reason);
+  if (materiality) return `importance sous ${materiality[1]}`;
+
+  const confidence = /^confidence below (.+)$/.exec(reason);
+  if (confidence) return `fiabilité sous ${confidence[1]}`;
+
+  return reason;
+}
+
 export interface FunnelStep {
   stage: FunnelStage;
   count: number;
@@ -109,6 +166,42 @@ export function summariseFunnel(steps: FunnelStep[]): string {
   }
 
   return `${label.toLowerCase()}: ${last.count} — cycle ended here${reasonsText(last.reasons)}.`;
+}
+
+/**
+ * The same sentence in French, built at render time rather than stored.
+ *
+ * A cycle's `summary` is written once and kept in saved state, so translating
+ * it there would leave old cycles in the old language for as long as the state
+ * file lives. Deriving it from the steps means the whole history speaks
+ * whatever the reader speaks today.
+ */
+export function summariseFunnelFr(steps: FunnelStep[]): string {
+  const last = steps[steps.length - 1];
+  if (!last) return 'Le cycle n’a pas démarré.';
+
+  const label = FUNNEL_STAGE_LABELS_FR[last.stage].toLowerCase();
+
+  if (last.count === 0) {
+    const prev = steps[steps.length - 2];
+    // No earlier step to compare against, so there is no "N → 0" to write.
+    // The reasons still belong here: they are the whole content of the line.
+    if (!prev) return `Aucun résultat à l’étape « ${label} »${reasonsTextFr(last.reasons)}.`;
+    const prevLabel = FUNNEL_STAGE_LABELS_FR[prev.stage].toLowerCase();
+    return `${prev.count} ${prevLabel} → 0 ${label}${reasonsTextFr(last.reasons)}.`;
+  }
+
+  if (last.stage === 'orders') {
+    return last.count === 1 ? '1 ordre passé.' : `${last.count} ordres passés.`;
+  }
+
+  return `${label} : ${last.count} — le cycle s’est arrêté là${reasonsTextFr(last.reasons)}.`;
+}
+
+function reasonsTextFr(reasons: Record<string, number> | undefined): string {
+  if (!reasons) return '';
+  const parts = Object.entries(reasons).map(([reason, n]) => `${n} ${funnelReasonFr(reason)}`);
+  return parts.length > 0 ? ` — ${parts.join(', ')}` : '';
 }
 
 export interface CycleFunnelHistoryOptions {
