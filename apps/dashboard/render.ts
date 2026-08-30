@@ -3,7 +3,12 @@ import type { Order } from '../../src/execution/broker/types.js';
 import type { MarketEvent } from '../../src/intelligence/types.js';
 import type { Signal } from '../../src/strategy/signals/types.js';
 import type { ActivityEntry } from '../../src/monitoring/activity-log.js';
-import { FUNNEL_STAGE_LABELS, type CycleFunnel } from '../../src/monitoring/cycle-funnel.js';
+import {
+  FUNNEL_STAGE_LABELS_FR,
+  funnelReasonFr,
+  summariseFunnelFr,
+  type CycleFunnel,
+} from '../../src/monitoring/cycle-funnel.js';
 import type { AgentState } from '../worker/agent.js';
 
 /**
@@ -133,7 +138,7 @@ function formatAge(seconds: number | undefined): string {
 function funnelReasonsText(reasons: Record<string, number> | undefined): string {
   if (!reasons) return '';
   return Object.entries(reasons)
-    .map(([reason, n]) => `${n} ${escapeHtml(reason)}`)
+    .map(([reason, n]) => `${n} ${escapeHtml(funnelReasonFr(reason))}`)
     .join(', ');
 }
 
@@ -141,12 +146,68 @@ function funnelStepRows(steps: CycleFunnel['steps']): string {
   return steps
     .map(
       (step) => `<tr>
-        <td>${escapeHtml(FUNNEL_STAGE_LABELS[step.stage])}</td>
+        <td>${escapeHtml(FUNNEL_STAGE_LABELS_FR[step.stage])}</td>
         <td class="count">${step.count}</td>
         <td class="muted">${funnelReasonsText(step.reasons)}</td>
       </tr>`,
     )
     .join('');
+}
+
+/**
+ * The three sentences somebody who did not build this needs, in French.
+ *
+ * The funnel table below says the same thing precisely; this says it in the
+ * order a person asks it — what did you read, what did you make of it, and why
+ * is there nothing in my portfolio. Everything here is read from the cycle's
+ * own steps, so it cannot claim a state the funnel contradicts.
+ */
+function briefingFr(funnel: CycleFunnel | undefined): string {
+  if (!funnel) {
+    return `<p class="say">Aucun cycle n’a encore tourné. Le bot vient de démarrer :
+      laisse-lui une minute, la page se rafraîchit toute seule.</p>`;
+  }
+
+  const countAt = (stage: CycleFunnel['steps'][number]['stage']): number | undefined =>
+    funnel.steps.find((step) => step.stage === stage)?.count;
+
+  const read = countAt('ingest') ?? 0;
+  const events = countAt('events') ?? 0;
+  const analysed = countAt('analysed') ?? 0;
+  const orders = countAt('orders') ?? 0;
+  const lines: string[] = [];
+
+  lines.push(
+    read === 0
+      ? 'Le bot n’a trouvé <strong>aucun article nouveau</strong> à ce cycle.'
+      : `Le bot a lu <strong>${read}</strong> article(s).`,
+  );
+
+  if (read > 0) {
+    lines.push(
+      events === 0
+        ? 'Rien dedans ne ressemblait à un événement de marché.'
+        : `Il y a repéré <strong>${events}</strong> événement(s), et en a analysé <strong>${analysed}</strong> en détail.`,
+    );
+  }
+
+  // The last step reached is the one that explains the silence, and its own
+  // reasons are the only honest answer to "why not".
+  const last = funnel.steps[funnel.steps.length - 1];
+  if (orders > 0) {
+    lines.push(`Il a passé <strong>${orders}</strong> ordre(s) — visibles plus bas.`);
+  } else if (last && last.reasons && Object.keys(last.reasons).length > 0) {
+    const why = Object.entries(last.reasons)
+      .map(([reason, n]) => `${n} ${funnelReasonFr(reason)}`)
+      .join(', ');
+    lines.push(`<strong>Aucun ordre passé</strong> — ${escapeHtml(why)}.`);
+  } else if (analysed > 0) {
+    lines.push('<strong>Aucun ordre passé</strong> : rien n’a paru assez solide pour agir.');
+  } else {
+    lines.push('<strong>Aucun ordre passé</strong> — il n’y avait rien à analyser.');
+  }
+
+  return lines.map((line) => `<p class="say">${line}</p>`).join('');
 }
 
 /** A section folded away by default — present, not competing for attention. */
@@ -574,10 +635,12 @@ export function renderDashboard(data: DashboardData): string {
   // sentence too whenever nothing is wrong. Reprinting either twelve pixels
   // lower reads as two facts when it is one — so this line exists only in the
   // states where the banner had something more urgent to say.
-  const funnelLead =
-    latestFunnel && state.detail !== latestFunnel.summary
-      ? `<p class="muted" style="margin:0 0 12px">${escapeHtml(latestFunnel.summary)}</p>`
-      : '';
+  // Derived here rather than read from `summary`: the stored sentence is
+  // written once and kept in the state file, so translating it there would
+  // leave every past cycle in the old language for as long as that file lives.
+  const funnelLead = latestFunnel
+    ? `<p class="muted" style="margin:0 0 12px">${escapeHtml(summariseFunnelFr(latestFunnel.steps))}</p>`
+    : '';
   // The funnel says how many documents arrived. Only this says whether zero is
   // the expected answer for what the system is pointed at.
   const { official, news, unknownIds } = data.coverage;
@@ -600,21 +663,21 @@ export function renderDashboard(data: DashboardData): string {
   const funnelSection = latestFunnel
     ? `${funnelLead}
     <div class="scroll"><table class="funnel">
-      <thead><tr><th>Stage</th><th>Count</th><th>Dropped</th></tr></thead>
+      <thead><tr><th>Étape</th><th>Nombre</th><th>Écartés</th></tr></thead>
       <tbody>${funnelStepRows(latestFunnel.steps)}</tbody>
     </table></div>
     ${coverageNote}
     ${
       previousFunnels.length > 0
-        ? `<details><summary>Previous cycles (${previousFunnels.length})</summary><ul>${previousFunnels
+        ? `<details><summary>Cycles précédents (${previousFunnels.length})</summary><ul>${previousFunnels
             .map(
               (f) =>
-                `<li class="muted mono">#${f.cycleId} ${escapeHtml(f.finishedAt.slice(11, 19))} — ${escapeHtml(f.summary)}</li>`,
+                `<li class="muted mono">#${f.cycleId} ${escapeHtml(f.finishedAt.slice(11, 19))} — ${escapeHtml(summariseFunnelFr(f.steps))}</li>`,
             )
             .join('')}</ul></details>`
         : ''
     }`
-    : `<div class="empty">No cycle has run yet.</div>${coverageNote}`;
+    : `<div class="empty">Aucun cycle n’a encore tourné.</div>${coverageNote}`;
 
   const outcomeEntries = Object.entries(data.outcomes.rates).sort(
     (a, b) => b[1].sampleSize - a[1].sampleSize,
@@ -670,7 +733,12 @@ export function renderDashboard(data: DashboardData): string {
   </section>
 
   <section>
-    <h2>What happened in the last cycle</h2>
+    <h2>Où en est le bot</h2>
+    ${briefingFr(latestFunnel)}
+  </section>
+
+  <section>
+    <h2>Ce qui s’est passé au dernier cycle</h2>
     ${funnelSection}
   </section>
 
