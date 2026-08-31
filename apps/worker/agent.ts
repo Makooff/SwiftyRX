@@ -655,6 +655,11 @@ export class TradingAgent {
     }
 
     const { kept: worthAnalysing, droppedByReason: gateDrops } = evaluateAnalysisGate(events, {
+      // Previously omitted, which left both floors at the function's own
+      // defaults with no way to reach them from a .env — the stage where most
+      // events actually die, tuned by nobody.
+      minMateriality: this.config.MIN_EVENT_MATERIALITY,
+      minConfidence: this.config.MIN_EVENT_CONFIDENCE,
       // A watched source's events may cross the confidence floor, because
       // whether to believe it is precisely the question observation exists to
       // answer. The risk engine still refuses the order.
@@ -690,7 +695,7 @@ export class TradingAgent {
     if (candidates.length === 0) return;
 
     // --- Analyse, score, decide -------------------------------------------
-    const analysed = candidates.slice(0, 5);
+    const analysed = candidates.slice(0, this.config.MAX_EVENTS_ANALYSED_PER_CYCLE);
     funnel.step(
       'analysed',
       analysed.length,
@@ -845,6 +850,10 @@ export class TradingAgent {
       ...(regime ? { regime } : {}),
       ...(historical ? { historicalHitRate: historical.hitRate, historicalSampleSize: historical.sampleSize } : {}),
       ...(this.tradableUniverse.length > 0 ? { tradableUniverse: this.tradableUniverse } : {}),
+      // 'default' means "say nothing and let the provider choose", which is
+      // what every analysis before this did — the parameter was wired end to
+      // end and never once set.
+      ...(this.config.LLM_EFFORT !== 'default' ? { effort: this.config.LLM_EFFORT } : {}),
       clock: this.clock,
       logger: this.log,
     });
