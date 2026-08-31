@@ -162,7 +162,10 @@ function funnelStepRows(steps: CycleFunnel['steps']): string {
  * is there nothing in my portfolio. Everything here is read from the cycle's
  * own steps, so it cannot claim a state the funnel contradicts.
  */
-function briefingFr(funnel: CycleFunnel | undefined): string {
+function briefingFr(
+  funnel: CycleFunnel | undefined,
+  coverage: DashboardData['coverage'],
+): string {
   if (!funnel) {
     return `<p class="say">Aucun cycle n’a encore tourné. Le bot vient de démarrer :
       laisse-lui une minute, la page se rafraîchit toute seule.</p>`;
@@ -182,6 +185,20 @@ function briefingFr(funnel: CycleFunnel | undefined): string {
       ? 'Le bot n’a trouvé <strong>aucun article nouveau</strong> à ce cycle.'
       : `Le bot a lu <strong>${read}</strong> article(s).`,
   );
+
+  // The single most common cause of a permanently empty funnel, and until now
+  // it was only stated in English in a grey note below the table. An operator
+  // watching "0 articles" cycle after cycle needs the cause here, next to the
+  // symptom, with the line to change.
+  if (read === 0 && coverage.news === 0) {
+    lines.push(
+      'C’est <strong>normal</strong> : seules les sources officielles sont activées ' +
+        '(banques centrales, statistiques). Elles publient quelques fois par semaine, ' +
+        'pas en continu. Pour ajouter les actualités d’entreprises — Reuters, CNBC, FT — ' +
+        'mets <span class="mono">ENABLED_SOURCES=all</span> dans ton fichier ' +
+        '<span class="mono">.env</span>, puis relance.',
+    );
+  }
 
   if (read > 0) {
     lines.push(
@@ -734,7 +751,7 @@ export function renderDashboard(data: DashboardData): string {
 
   <section>
     <h2>Où en est le bot</h2>
-    ${briefingFr(latestFunnel)}
+    ${briefingFr(latestFunnel, data.coverage)}
   </section>
 
   <section>

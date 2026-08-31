@@ -513,6 +513,65 @@ describe('dashboard API', () => {
     expect(body).not.toContain('<th>Stage</th>');
   });
 
+  it('names the empty feed set as the cause when nothing is being read', async () => {
+    // The funnel showing "0 articles" cycle after cycle is the state an
+    // operator stares at longest, and the cause was previously only in an
+    // English note below the table. It belongs next to the symptom.
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    // A cycle has to have run: before the first one the honest answer is
+    // "wait", not "your feed set is wrong".
+    await agent.runCycle();
+    const server = createApiServer({ agent, config: loadConfig({ ENABLED_SOURCES: '' }) });
+
+    const body = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', async () => {
+        const address = server.address() as { port: number };
+        const res = await fetch(`http://127.0.0.1:${address.port}/`);
+        resolve(await res.text());
+        server.close();
+      });
+    });
+
+    expect(body).toContain('seules les sources officielles sont activées');
+    expect(body).toContain('ENABLED_SOURCES=all');
+  });
+
+  it('waits for a first cycle before blaming anything', async () => {
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    const server = createApiServer({ agent, config: loadConfig({ ENABLED_SOURCES: '' }) });
+
+    const body = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', async () => {
+        const address = server.address() as { port: number };
+        const res = await fetch(`http://127.0.0.1:${address.port}/`);
+        resolve(await res.text());
+        server.close();
+      });
+    });
+
+    expect(body).toContain('Aucun cycle n’a encore tourné');
+    // Not asserted on the bare setting name: the English coverage note below
+    // the funnel already mentions it on every render, cycle or no cycle.
+    expect(body).not.toContain('seules les sources officielles sont activées');
+  });
+
+  it('does not blame the feed set once company news is on', async () => {
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    await agent.runCycle();
+    const server = createApiServer({ agent, config: loadConfig({ ENABLED_SOURCES: 'all' }) });
+
+    const body = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', async () => {
+        const address = server.address() as { port: number };
+        const res = await fetch(`http://127.0.0.1:${address.port}/`);
+        resolve(await res.text());
+        server.close();
+      });
+    });
+
+    expect(body).not.toContain('seules les sources officielles sont activées');
+  });
+
   it('says plainly when the model may not pick the asset', async () => {
     const { agent } = await agentWith([], llmReturning(bullishHypothesis));
     const server = createApiServer({ agent, config: loadConfig({}) });
