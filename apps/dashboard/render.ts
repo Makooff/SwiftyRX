@@ -61,6 +61,14 @@ export interface DashboardData {
     official: number;
     news: number;
     unknownIds: string[];
+    /**
+     * Whether X ingestion is switched on.
+     *
+     * Read from the configuration rather than inferred from the health table,
+     * because absence of an X adapter and a disabled one are different facts
+     * and only one of them is a setting.
+     */
+    xIngestion: boolean;
   };
   events: MarketEvent[];
   orders: Order[];
@@ -162,7 +170,10 @@ function funnelStepRows(steps: CycleFunnel['steps']): string {
  * is there nothing in my portfolio. Everything here is read from the cycle's
  * own steps, so it cannot claim a state the funnel contradicts.
  */
-function briefingFr(funnel: CycleFunnel | undefined): string {
+function briefingFr(
+  funnel: CycleFunnel | undefined,
+  coverage: DashboardData['coverage'],
+): string {
   if (!funnel) {
     return `<p class="say">Aucun cycle n’a encore tourné. Le bot vient de démarrer :
       laisse-lui une minute, la page se rafraîchit toute seule.</p>`;
@@ -182,6 +193,20 @@ function briefingFr(funnel: CycleFunnel | undefined): string {
       ? 'Le bot n’a trouvé <strong>aucun article nouveau</strong> à ce cycle.'
       : `Le bot a lu <strong>${read}</strong> article(s).`,
   );
+
+  // The single most common cause of a permanently empty funnel, and until now
+  // it was only stated in English in a grey note below the table. An operator
+  // watching "0 articles" cycle after cycle needs the cause here, next to the
+  // symptom, with the line to change.
+  if (read === 0 && coverage.news === 0) {
+    lines.push(
+      'C’est <strong>normal</strong> : seules les sources officielles sont activées ' +
+        '(banques centrales, statistiques). Elles publient quelques fois par semaine, ' +
+        'pas en continu. Pour ajouter les actualités d’entreprises — Reuters, CNBC, FT — ' +
+        'mets <span class="mono">ENABLED_SOURCES=all</span> dans ton fichier ' +
+        '<span class="mono">.env</span>, puis relance.',
+    );
+  }
 
   if (read > 0) {
     lines.push(
@@ -205,6 +230,21 @@ function briefingFr(funnel: CycleFunnel | undefined): string {
     lines.push('<strong>Aucun ordre passé</strong> : rien n’a paru assez solide pour agir.');
   } else {
     lines.push('<strong>Aucun ordre passé</strong> — il n’y avait rien à analyser.');
+  }
+
+  // Stated here because the alternative is that nobody reads it. The health
+  // table already reports "disabled" for the x adapter, in English, in a list
+  // of adapters — which is exactly how someone can run this for months
+  // believing it watches Twitter. It does not, and that is a configuration
+  // choice, not a fault.
+  if (!coverage.xIngestion) {
+    lines.push(
+      '<strong>Twitter / X : éteint.</strong> Aucun tweet n’est lu. ' +
+        'Les lectures X sont facturées au post, et surtout un tweet seul ne peut ' +
+        'pas déclencher d’ordre : un événement dont toutes les sources sont ' +
+        'sociales est écarté avant même d’être analysé. Un tweet ne compte que ' +
+        's’il rejoint une dépêche ou un dépôt officiel disant la même chose.',
+    );
   }
 
   return lines.map((line) => `<p class="say">${line}</p>`).join('');
@@ -734,7 +774,7 @@ export function renderDashboard(data: DashboardData): string {
 
   <section>
     <h2>Où en est le bot</h2>
-    ${briefingFr(latestFunnel)}
+    ${briefingFr(latestFunnel, data.coverage)}
   </section>
 
   <section>

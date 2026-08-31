@@ -131,6 +131,10 @@ echo   Le navigateur s'ouvre dans quelques secondes.
 echo.
 echo   Pour arreter : ferme cette fenetre, ou double-clique Arreter-SwiftyRX.bat
 echo.
+echo   Le bot ne trouve rien, ou ne prend jamais de position ?
+echo   Ferme cette fenetre et double-clique Reglages-SwiftyRX.bat : il dit
+echo   quels reglages changer et pourquoi, et ne modifie rien sans te demander.
+echo.
 
 REM Le navigateur part en parallele : npm run paper ne rend jamais la main, et
 REM le serveur met une seconde ou deux a repondre.

@@ -7,6 +7,9 @@ coverage/
 .env
 .env.*
 !.env.example
+# Thresholds and source lists only. If a credential is ever added here, this
+# exception is what would leak it — so it must stay free of secrets.
+!.env.recommande
 
 # Local runtime state
 data/

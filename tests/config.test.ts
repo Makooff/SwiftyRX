@@ -204,3 +204,42 @@ describe('model-chosen asset', () => {
     expect(loadConfig(envFor({ ALLOW_MODEL_CHOSEN_ASSET: 'true' })).ALLOW_MODEL_CHOSEN_ASSET).toBe(true);
   });
 });
+
+describe('what reaches the model', () => {
+  it('keeps both analysis floors where they have always been', () => {
+    const config = loadConfig(empty);
+    expect(config.MIN_EVENT_MATERIALITY).toBe(0.4);
+    expect(config.MIN_EVENT_CONFIDENCE).toBe(0.5);
+  });
+
+  it('can be lowered so a well-classified contract is finally analysed', () => {
+    // 0.396 is the materiality of a perfectly classified signed contract with
+    // a ticker — under the default floor by four thousandths.
+    const config = loadConfig(envFor({ MIN_EVENT_MATERIALITY: '0.35' }));
+    expect(config.MIN_EVENT_MATERIALITY).toBe(0.35);
+    expect(0.396).toBeGreaterThan(config.MIN_EVENT_MATERIALITY);
+  });
+
+  it('rejects a floor outside [0,1] rather than dropping every event', () => {
+    expect(() => loadConfig(envFor({ MIN_EVENT_MATERIALITY: '40' }))).toThrow(ConfigError);
+    expect(() => loadConfig(envFor({ MIN_EVENT_CONFIDENCE: '-1' }))).toThrow(ConfigError);
+  });
+
+  it('leaves the analysis effort to the provider unless asked', () => {
+    // The parameter was wired to the API and never set: every analysis this
+    // system has produced ran at the provider's default.
+    expect(loadConfig(empty).LLM_EFFORT).toBe('default');
+    expect(loadConfig(envFor({ LLM_EFFORT: 'high' })).LLM_EFFORT).toBe('high');
+  });
+
+  it('refuses an effort level the provider does not define', () => {
+    expect(() => loadConfig(envFor({ LLM_EFFORT: 'maximum' }))).toThrow(ConfigError);
+  });
+
+  it('caps events analysed per cycle, and refuses a cap of zero', () => {
+    expect(loadConfig(empty).MAX_EVENTS_ANALYSED_PER_CYCLE).toBe(5);
+    expect(loadConfig(envFor({ MAX_EVENTS_ANALYSED_PER_CYCLE: '12' })).MAX_EVENTS_ANALYSED_PER_CYCLE).toBe(12);
+    // Zero would silently analyse nothing while every other setting looked fine.
+    expect(() => loadConfig(envFor({ MAX_EVENTS_ANALYSED_PER_CYCLE: '0' }))).toThrow(ConfigError);
+  });
+});

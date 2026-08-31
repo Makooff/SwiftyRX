@@ -59,6 +59,28 @@ function settingsRows(config: AppConfig): DashboardData['settings'] {
       value: String(config.MIN_SIGNAL_SCORE),
       note: 'below this: no order is considered',
     },
+    // The stage before the score bar, and where most events actually die.
+    // Shown beside it so "nothing traded" can be traced to the right floor.
+    {
+      label: 'Min event materiality',
+      value: String(config.MIN_EVENT_MATERIALITY),
+      note: 'below this: never analysed',
+    },
+    {
+      label: 'Min event confidence',
+      value: String(config.MIN_EVENT_CONFIDENCE),
+      note: 'how sure we are the claim is true',
+    },
+    {
+      label: 'Events analysed / cycle',
+      value: String(config.MAX_EVENTS_ANALYSED_PER_CYCLE),
+      note: 'past this, the rest wait for the next cycle',
+    },
+    {
+      label: 'Analysis effort',
+      value: config.LLM_EFFORT,
+      note: config.LLM_EFFORT === 'default' ? "the provider's own default" : 'costs more per event',
+    },
     {
       label: 'Model may pick the asset',
       value: config.ALLOW_MODEL_CHOSEN_ASSET ? 'yes' : 'off',
@@ -143,6 +165,7 @@ function feedCoverage(config: AppConfig): DashboardData['coverage'] {
     official: feeds.filter((f) => f.category === 'official').length,
     news: feeds.filter((f) => f.category === 'news').length,
     unknownIds,
+    xIngestion: config.ENABLE_X_INGESTION,
   };
 }
 

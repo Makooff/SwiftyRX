@@ -31,10 +31,11 @@ import type { DocumentSource, FetchWindow } from '../types.js';
  *    no trending scrape, no "influencer discovery".
  *  - Posts enter as tier `social` with a low reliability prior and
  *    verification status `unverified`.
- *  - `canTriggerOrderDirectly: false` is stamped on every document. A post is
- *    a lead to investigate against official sources, never a trade trigger.
- *    Accounts get compromised, parodied and spoofed; an account handle is not
- *    evidence about the world.
+ *  - A post is a lead to investigate against official sources, never a trade
+ *    trigger. Accounts get compromised, parodied and spoofed; an account handle
+ *    is not evidence about the world. That rule is enforced downstream, by the
+ *    confidence cap in the verifier and the score penalty in the scorer — not
+ *    by the metadata this adapter stamps, which only describes it.
  */
 
 const X_API_BASE = 'https://api.x.com/2/';
@@ -242,8 +243,14 @@ export class XAdapter implements DocumentSource {
             isReply: post.referenced_tweets?.some((r) => r.type === 'replied_to') ?? false,
             isRepost: post.referenced_tweets?.some((r) => r.type === 'retweeted') ?? false,
             linkedUrls: (post.entities?.urls ?? []).map((u) => u.expanded_url).filter(Boolean),
-            // Read by the strategy layer: a social post can never be the sole
-            // basis for an order, regardless of how confident a model is.
+            // Descriptive, not enforcing. Nothing reads these two fields, and
+            // an earlier version of this comment claimed the strategy layer
+            // did — which would have been a comfortable place to hide a hole.
+            // What actually stops a post from trading is arithmetic, in two
+            // independent places: verifier.ts caps a social-only cluster at
+            // SOCIAL_ONLY_CONFIDENCE_CAP, below the analysis gate's confidence
+            // floor, so the event is dropped before an LLM reads it; and
+            // scorer.ts cuts the score by 70% if one ever gets past that.
             canTriggerOrderDirectly: false,
             requiresCorroboration: true,
           },

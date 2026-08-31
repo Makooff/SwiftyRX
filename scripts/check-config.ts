@@ -44,6 +44,12 @@ try {
   console.log(`  quote staleness limit     ${config.MAX_QUOTE_STALENESS_SECONDS}s`);
   console.log(`  min signal score          ${config.MIN_SIGNAL_SCORE}`);
 
+  console.log('\n--- what reaches the model ---');
+  console.log(`  min event materiality     ${config.MIN_EVENT_MATERIALITY}`);
+  console.log(`  min event confidence      ${config.MIN_EVENT_CONFIDENCE}`);
+  console.log(`  events analysed / cycle   ${config.MAX_EVENTS_ANALYSED_PER_CYCLE}`);
+  console.log(`  analysis effort           ${config.LLM_EFFORT}`);
+
   console.log('\n--- what may be traded ---');
   console.log(`  tradable universe         ${config.tradableUniverse.join(', ') || '(none)'}`);
   console.log(

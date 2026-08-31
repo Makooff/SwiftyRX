@@ -99,6 +99,47 @@ const rawSchema = z.object({
    */
   MIN_SIGNAL_SCORE: num(0.55),
 
+  /**
+   * The two floors an event must clear before anyone pays to analyse it.
+   *
+   * `evaluateAnalysisGate` has always taken these as options and the agent has
+   * always called it without them, so both sat at their defaults with no way
+   * to reach them from a `.env` — the same shape of gap `MIN_SIGNAL_SCORE`
+   * had, one stage earlier in the pipeline.
+   *
+   * They are the reason a well-classified story can still never be read: a
+   * signed multi-year contract from a news source scores about 0.40
+   * materiality *with* a ticker, which sits on the wrong side of the default
+   * by a hair. Lowering the floor buys more analysis and a larger token bill;
+   * it does not weaken any limit on what may trade.
+   *
+   * Defaults unchanged, so nothing moves until an operator decides.
+   */
+  MIN_EVENT_MATERIALITY: num(0.4),
+  MIN_EVENT_CONFIDENCE: num(0.5),
+
+  /**
+   * How hard the model thinks about each event.
+   *
+   * The parameter is carried all the way to the API (`anthropic.ts`, in
+   * `output_config`) and through the generator, and nothing has ever set it:
+   * every analysis this system has produced ran at the provider's default.
+   * "default" keeps that; anything else is sent through.
+   *
+   * Higher effort costs more per call and produces better reasoning on the
+   * ambiguous events — which are most of them.
+   */
+  LLM_EFFORT: z.enum(['default', 'low', 'medium', 'high', 'xhigh', 'max']).default('default'),
+
+  /**
+   * How many events may be analysed in one cycle.
+   *
+   * A hard cap on the token bill, and the last silent decision in the
+   * pipeline: past it, events are dropped by their position in a list rather
+   * than by anything about them. Worth seeing rather than discovering.
+   */
+  MAX_EVENTS_ANALYSED_PER_CYCLE: num(5),
+
   // ---- Evidence -----------------------------------------------------------
   /**
    * Where `npm run study --out` writes what the event study found, and where
@@ -321,6 +362,20 @@ function assertSafetyInvariants(cfg: z.infer<typeof rawSchema>): string[] {
   // a typo: 55 instead of 0.55 would silently refuse every order ever scored.
   if (cfg.MIN_SIGNAL_SCORE < 0 || cfg.MIN_SIGNAL_SCORE > 1) {
     problems.push(`MIN_SIGNAL_SCORE must be between 0 and 1 (got ${cfg.MIN_SIGNAL_SCORE}).`);
+  }
+  for (const [name, value] of [
+    ['MIN_EVENT_MATERIALITY', cfg.MIN_EVENT_MATERIALITY],
+    ['MIN_EVENT_CONFIDENCE', cfg.MIN_EVENT_CONFIDENCE],
+  ] as const) {
+    // Same reasoning as MIN_SIGNAL_SCORE: these are compared against values
+    // that are always in [0,1], so anything outside it is a typo that would
+    // silently drop every event rather than a loose setting.
+    if (value < 0 || value > 1) {
+      problems.push(`${name} must be between 0 and 1 (got ${value}).`);
+    }
+  }
+  if (cfg.MAX_EVENTS_ANALYSED_PER_CYCLE < 1) {
+    problems.push('MAX_EVENTS_ANALYSED_PER_CYCLE must be at least 1.');
   }
   if (cfg.MODE === 'live' && cfg.MIN_SIGNAL_SCORE < 0.5) {
     problems.push(

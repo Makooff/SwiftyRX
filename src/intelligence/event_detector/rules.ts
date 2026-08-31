@@ -88,6 +88,54 @@ export const KEYWORD_RULES: KeywordRule[] = [
   { id: 'kw:legal:fine', type: 'legal_action', weight: 0.6, pattern: /\b(fined?|penalt(?:y|ies)|settlement of)\b[^.]{0,40}\b(million|billion|€|\$)/i },
   { id: 'kw:exec', type: 'executive_change', weight: 0.6, pattern: /\b(chief executive|\bCEO\b|chief financial officer|\bCFO\b)\b[^.]{0,60}\b(steps? down|resign(?:s|ed)?|appoint(?:s|ed)?|to succeed|departure)\b/i },
   { id: 'kw:product', type: 'product', weight: 0.3, pattern: /\b(launch(?:es|ed)? (?:a |the |its )?new|unveil(?:s|ed)?|product recall)\b/i },
+
+  // --- Wire-service phrasing ------------------------------------------------
+  //
+  // The rules above were written against press releases, where an organisation
+  // announces its own news in its own vocabulary. A newswire writes the same
+  // event differently — "beats estimates" rather than "quarterly results",
+  // "signs a deal with" rather than a Form 8-K item 1.01 — and with the news
+  // feeds on, that phrasing is most of what arrives.
+  //
+  // Weights stay in the same low band as their neighbours. These match prose,
+  // not an issuer's declaration of what a filing concerns, and a confident
+  // wrong classification costs more than an unconfident right one: the event
+  // study keys on the category, so a mislabelled event pollutes a measurement
+  // that later decides what may trade.
+
+  // Contracts and partnerships. A signed multi-year agreement moves the
+  // supplier as much as the buyer, and until now nothing outside an 8-K could
+  // reach this category at all.
+  { id: 'kw:agreement:contract', type: 'material_agreement', weight: 0.6, pattern: /\b(sign(?:s|ed)?|award(?:s|ed)?|wins?|won|secur(?:es|ed))\b[^.]{0,40}\b(contract|deal|agreement)\b/i },
+  { id: 'kw:agreement:partnership', type: 'material_agreement', weight: 0.55, pattern: /\b(strategic partnership|partnership with|partners? with|joint venture|teams? up with)\b/i },
+  { id: 'kw:agreement:supply', type: 'material_agreement', weight: 0.6, pattern: /\b((?:long[- ]term |multi[- ]?year )?supply (?:agreement|deal|contract)|multi[- ]?year (?:agreement|deal|contract)|offtake agreement)\b/i },
+  // Its own rule rather than a branch of the one above: the "AI needs
+  // electricity" trade is the single most common ticker-less story right now.
+  { id: 'kw:agreement:power', type: 'material_agreement', weight: 0.6, pattern: /\b(power purchase agreement|\bPPA\b|electricity (?:supply|purchase)|energy (?:supply )?(?:deal|agreement)|nuclear (?:power )?(?:deal|agreement))\b/i },
+
+  // Results, as a wire writes them.
+  { id: 'kw:earnings:beat_miss', type: 'earnings', weight: 0.6, pattern: /\b(beat(?:s|ing)?|miss(?:es|ed)?|top(?:s|ped)?|exceed(?:s|ed)?|fell short of)\b[^.]{0,30}\b(estimates?|expectations?|forecasts?|consensus)\b/i },
+  // "sales" is guarded: "retail sales rose" is a macro release, and without
+  // the exclusion it matched here with the same weight as the macro rule and
+  // won the tie on ordering alone — a statistics print filed as company
+  // earnings, which is the kind of mislabelling the event study then measures.
+  { id: 'kw:earnings:move', type: 'earnings', weight: 0.5, pattern: /\b(revenue|profits?|net income|operating income|earnings|(?<!\b(?:retail|home|car|auto|vehicle|chip|arms) )sales)\b[^.]{0,40}\b(rose|fell|jump(?:s|ed)?|surg(?:es|ed)|climb(?:s|ed)?|drop(?:s|ped)?|declin(?:es|ed)|boost|slump(?:s|ed)?|plunge[ds]?)\b/i },
+  { id: 'kw:earnings:quarter', type: 'earnings', weight: 0.6, pattern: /\bQ[1-4]\b[^.]{0,20}\b(results|earnings|revenue|profits?)\b/i },
+
+  // Deals short of a completed acquisition. "In talks" is a claim, not a fact;
+  // the verifier is what decides how much to believe it.
+  { id: 'kw:m_and_a:stake', type: 'm_and_a', weight: 0.6, pattern: /\b(acquir(?:es|ed)|buys?|bought|takes?|purchas(?:es|ed))\b[^.]{0,30}\b(stake|majority|controlling interest)\b/i },
+  { id: 'kw:m_and_a:talks', type: 'm_and_a', weight: 0.55, pattern: /\b(in talks to (?:buy|acquire|merge)|explor(?:es|ing) (?:a )?(?:sale|merger)|agreed to buy|bid for)\b/i },
+
+  { id: 'kw:restructuring:layoffs', type: 'restructuring', weight: 0.6, pattern: /\b(lay ?offs?|job cuts|cut(?:s|ting)? \d[\d,]* jobs|restructuring (?:plan|programme|program)|plant closure|clos(?:es|ing) (?:its )?(?:plant|factory))\b/i },
+
+  { id: 'kw:legal:ruling', type: 'legal_action', weight: 0.5, pattern: /\b(court (?:rules?|ruled|orders?|ordered)|judge (?:rules?|ruled)|appeals? court|jury (?:found|awarded)|verdict)\b/i },
+
+  // Capacity announcements sit at the same low weight as the product rule they
+  // join: a new factory is real, but it is years of cash flow away.
+  { id: 'kw:product:capacity', type: 'product', weight: 0.4, pattern: /\b(new (?:plant|factory|data ?cent(?:re|er)|facility)|capacity expansion|expands? (?:production|capacity)|breaks? ground on)\b/i },
+
+  { id: 'kw:macro:activity', type: 'macro_release', weight: 0.5, pattern: /\b(retail sales|consumer confidence|\bPMI\b|purchasing managers|housing starts|durable goods)\b/i },
 ];
 
 /**

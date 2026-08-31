@@ -515,6 +515,60 @@ describe('detectEvents', () => {
     expect(gate.droppedByReason).toMatchObject({ 'confidence below 0.5': 1 });
   });
 
+  it('ignores the metadata flags entirely — the cap is what stops the post', async () => {
+    // x.ts stamps canTriggerOrderDirectly:false on every post, and a comment
+    // there used to claim the strategy layer read it. Nothing does. Flipping
+    // the flag to true must therefore change nothing: if this test ever fails,
+    // a guarantee has quietly moved into a field an adapter controls, and any
+    // future source could then grant itself permission to trade.
+    const store = new MemoryEventStore(clock);
+    const { events } = await detectEvents(
+      [
+        doc({
+          source: 'x:@someone',
+          title: 'BREAKING: new tariffs on all semiconductor imports',
+          tickers: ['NVDA'],
+          metadata: { canTriggerOrderDirectly: true, requiresCorroboration: false },
+        }),
+      ],
+      store,
+      { clock },
+    );
+
+    expect(events[0]!.verification.confidence).toBeLessThanOrEqual(0.35);
+    expect(evaluateAnalysisGate(events).kept).toHaveLength(0);
+  });
+
+  it('lets the same post through once a wire carries the story too', async () => {
+    // The other half of the previous test, and the only thing enabling X can
+    // ever buy. The post is not promoted; the cluster simply stops being
+    // social-only, so the 0.35 cap no longer applies to it. This is the claim
+    // the dashboard and .env.example make to anyone deciding whether to pay
+    // for X reads, so it is pinned rather than asserted in prose.
+    const store = new MemoryEventStore(clock);
+    const { events } = await detectEvents(
+      [
+        doc({
+          source: 'x:@someone',
+          title: 'Apple to acquire a robotics startup',
+          tickers: ['AAPL'],
+        }),
+        doc({
+          source: 'outlet_a',
+          title: 'Apple to acquire a robotics startup',
+          tickers: ['AAPL'],
+        }),
+      ],
+      store,
+      { clock },
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.sources).toContain('x:@someone');
+    expect(events[0]!.verification.confidence).toBeGreaterThan(0.35);
+    expect(evaluateAnalysisGate(events).kept).toHaveLength(1);
+  });
+
   it('excludes contradicted events from analysis', async () => {
     const store = new MemoryEventStore(clock);
     const { events } = await detectEvents(

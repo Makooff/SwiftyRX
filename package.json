@@ -26,7 +26,8 @@
     "study": "tsx scripts/event-study.ts",
     "correlations": "tsx scripts/correlations.ts",
     "snapshot": "tsx scripts/snapshot.ts",
-    "why": "tsx scripts/why.ts"
+    "why": "tsx scripts/why.ts",
+    "tune": "tsx scripts/tune.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",

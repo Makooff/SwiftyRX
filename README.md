@@ -147,6 +147,7 @@ abandon. Le reste de la page (chiffres, positions, réglages) reste en anglais.
 | `npm run snapshot` | One text file with everything needed to diagnose a running agent from outside it |
 | `npm run dashboard` | Dashboard only, against a fresh agent state |
 | `npm run why` | Where each journalled decision actually stopped, counted — the answer to "it analysed everything and traded nothing". `-- --last 20`. Needs no LLM |
+| `npm run tune` | Which settings the measured outcomes argue for, in French, and why. `-- --apply` writes them after a backup. Never touches a risk limit. Needs no LLM |
 | `npm run doctor` | What works, what is degraded, what blocks trading — with the fix and the URL for each. Exits non-zero only when something blocks trading |
 | `npm run config:check` | Effective configuration and safety posture; never prints secrets |
 | `npm run sources:check` | Live health probe of every configured source; non-zero exit if any is broken |
@@ -215,6 +216,34 @@ the gate that fired rather than the one you assumed did:
 
 It costs nothing to run: no tokens, no orders, no network. Add `--last 20` for
 the individual decisions and their headlines.
+
+### Letting the system recommend its own settings
+
+`npm run tune` reads the same journal and reports which of four states it is in
+— empty, decisions awaiting a score, scored but under the sample bar, or enough
+to speak — and only claims what that state supports. Its output is in French,
+because the person who owns this bot reads French.
+
+Two rules make it worth trusting:
+
+**It recommends from outcomes, never from activity.** The only input is
+`outcome.directionCorrect` — what the market actually did after each decision.
+A system that lowers its own bar because it has not traded enough has learnt
+nothing; it has found a way to agree with itself.
+
+**It writes an allowlist of settings, and nothing else.** `ENABLED_SOURCES`,
+the three floors, the per-cycle cap, `LLM_EFFORT`, `ALLOW_MODEL_CHOSEN_ASSET`.
+Risk limits, instrument permissions, leverage, shorting and X are not on a list
+of exclusions — they are absent from the list of things that exist. Those are
+questions of risk tolerance and of billing, and no hit rate answers them.
+
+Under 30 scored outcomes it recommends the starting configuration in
+`.env.recommande` instead, and says plainly that those values came from a
+human's judgement rather than from measurement. That bootstrap applies once;
+everything after it has to rest on more outcomes than the last application did.
+
+`-- --apply` backs up `.env`, rewrites only the lines it names — leaving every
+comment where it was — and records what evidence it acted on.
 
 `CONTACT_EMAIL` is required for any SEC request — the SEC rejects requests whose
 `User-Agent` lacks a contact address, and the adapter refuses to send one without it rather
