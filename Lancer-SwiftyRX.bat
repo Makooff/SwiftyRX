@@ -108,9 +108,17 @@ echo [5/6] Diagnostic...
 call npm run doctor
 if errorlevel 1 (
   echo.
-  echo   Quelque chose empeche le bot de trader - c'est ecrit ci-dessus,
-  echo   avec la marche a suivre en face de chaque ligne BLOCKING.
+  echo   Le bot ne peut pas demarrer - la raison est ecrite juste au-dessus.
   echo.
+  REM Deux sorties possibles, et la premiere version de ce message n'en
+  REM decrivait qu'une : le doctor liste des lignes BLOCKING quand il a pu
+  REM tourner, mais une valeur invalide dans le .env le stoppe AVANT, et
+  REM affiche alors "Configuration rejected" sans aucune ligne BLOCKING.
+  echo   Dans les deux cas la cause est presque toujours une ligne du .env.
+  echo   Je l'ouvre : corrige la valeur citee ci-dessus, enregistre,
+  echo   puis relance ce fichier.
+  echo.
+  notepad ".env"
   goto :fin
 )
 
