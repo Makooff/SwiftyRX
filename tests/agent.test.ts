@@ -536,6 +536,29 @@ describe('dashboard API', () => {
     expect(body).toContain('ENABLED_SOURCES=all');
   });
 
+  it('says plainly that Twitter is off, and what enabling it would not buy', async () => {
+    // This project was described by its owner as "a bot that watches Twitter",
+    // and X ingestion has never once run. The health table did say so — as the
+    // word "disabled" in an English list of adapters, which is how someone can
+    // believe the opposite for months. The briefing says it in a sentence.
+    const { agent } = await agentWith([], llmReturning(bullishHypothesis));
+    await agent.runCycle();
+    const server = createApiServer({ agent, config: loadConfig({}) });
+
+    const body = await new Promise<string>((resolve) => {
+      server.listen(0, '127.0.0.1', async () => {
+        const address = server.address() as { port: number };
+        const res = await fetch(`http://127.0.0.1:${address.port}/`);
+        resolve(await res.text());
+        server.close();
+      });
+    });
+
+    expect(body).toContain('Twitter / X : éteint.');
+    // Not just "off": why turning it on would not do what he expects either.
+    expect(body).toContain('écarté avant même d’être analysé');
+  });
+
   it('waits for a first cycle before blaming anything', async () => {
     const { agent } = await agentWith([], llmReturning(bullishHypothesis));
     const server = createApiServer({ agent, config: loadConfig({ ENABLED_SOURCES: '' }) });

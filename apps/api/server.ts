@@ -165,6 +165,7 @@ function feedCoverage(config: AppConfig): DashboardData['coverage'] {
     official: feeds.filter((f) => f.category === 'official').length,
     news: feeds.filter((f) => f.category === 'news').length,
     unknownIds,
+    xIngestion: config.ENABLE_X_INGESTION,
   };
 }
 

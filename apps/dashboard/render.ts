@@ -61,6 +61,14 @@ export interface DashboardData {
     official: number;
     news: number;
     unknownIds: string[];
+    /**
+     * Whether X ingestion is switched on.
+     *
+     * Read from the configuration rather than inferred from the health table,
+     * because absence of an X adapter and a disabled one are different facts
+     * and only one of them is a setting.
+     */
+    xIngestion: boolean;
   };
   events: MarketEvent[];
   orders: Order[];
@@ -222,6 +230,21 @@ function briefingFr(
     lines.push('<strong>Aucun ordre passé</strong> : rien n’a paru assez solide pour agir.');
   } else {
     lines.push('<strong>Aucun ordre passé</strong> — il n’y avait rien à analyser.');
+  }
+
+  // Stated here because the alternative is that nobody reads it. The health
+  // table already reports "disabled" for the x adapter, in English, in a list
+  // of adapters — which is exactly how someone can run this for months
+  // believing it watches Twitter. It does not, and that is a configuration
+  // choice, not a fault.
+  if (!coverage.xIngestion) {
+    lines.push(
+      '<strong>Twitter / X : éteint.</strong> Aucun tweet n’est lu. ' +
+        'Les lectures X sont facturées au post, et surtout un tweet seul ne peut ' +
+        'pas déclencher d’ordre : un événement dont toutes les sources sont ' +
+        'sociales est écarté avant même d’être analysé. Un tweet ne compte que ' +
+        's’il rejoint une dépêche ou un dépôt officiel disant la même chose.',
+    );
   }
 
   return lines.map((line) => `<p class="say">${line}</p>`).join('');
