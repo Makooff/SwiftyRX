@@ -97,6 +97,22 @@ function llmReturning(value: unknown): LLMProvider {
   };
 }
 
+/** Like llmReturning, but the provider publishes a price for every call. */
+function llmCosting(value: unknown, costUsd: number): LLMProvider {
+  return {
+    id: 'test',
+    model: 'test-model',
+    isConfigured: () => true,
+    analyze: async <T,>() => ({
+      value: value as T,
+      usage: { inputTokens: 10, outputTokens: 10, estimatedCostUsd: costUsd },
+      model: 'test-model',
+      latencyMs: 3,
+    }),
+    health: async () => ({ state: 'healthy' as const }),
+  };
+}
+
 const bullishHypothesis = {
   asset: 'AAPL',
   action: 'BUY',
@@ -417,6 +433,95 @@ describe('cycle funnel', () => {
 
     const funnels = agent.getFunnels();
     expect(funnels.map((f) => f.cycleId)).toEqual([2, 1]);
+  });
+});
+
+describe('the daily analysis budget', () => {
+  // Built inside each test, never at describe time: doc() resolves the source
+  // against the registry, and beforeEach has not populated it during
+  // collection. A document made too early has no tier and dies at ingestion.
+  const documents = () => [
+    doc(
+      'sec_edgar',
+      'Apple Inc. filed 8-K — Results of Operations',
+      'Form 8-K filed by Apple Inc. Reported items: 2.02.',
+      { form: '8-K', items: ['2.02'] },
+      ['AAPL'],
+    ),
+    doc('outlet_a', 'Apple reports quarterly results above expectations', 'Earnings beat.', {}, ['AAPL']),
+  ];
+
+  it('does not stop when no ceiling is configured', async () => {
+    // The default, and what this system did before the budget existed.
+    const { agent } = await agentWith(documents(), llmCosting(bullishHypothesis, 5));
+    await agent.runCycle();
+    expect(agent.llmBudget.enforced).toBe(false);
+    expect(agent.getState().signalsGenerated).toBeGreaterThan(0);
+  });
+
+  it('counts what the analysis actually cost', async () => {
+    const { agent } = await agentWith(documents(), llmCosting(bullishHypothesis, 0.25), {
+      MAX_DAILY_LLM_COST_USD: '10',
+    });
+    await agent.runCycle();
+    expect(agent.llmBudget.spentUsd).toBeCloseTo(0.25, 6);
+  });
+
+  it('stops mid-cycle once the ceiling is crossed', async () => {
+    // Two separate events, and a price that exhausts the day on the first.
+    // The second must not be paid for: five analyses of a long document can
+    // cross the line inside a single pass, so the check belongs between
+    // events and not only between cycles.
+    const { agent } = await agentWith(
+      [
+        ...documents(),
+        doc('sec_edgar', 'Nvidia Inc. filed 8-K — Results of Operations', 'Form 8-K filed by Nvidia Inc. Reported items: 2.02.', { form: '8-K', items: ['2.02'] }, ['NVDA']),
+        doc('outlet_a', 'Nvidia reports quarterly results above expectations', 'Earnings beat.', {}, ['NVDA']),
+      ],
+      llmCosting(bullishHypothesis, 2),
+      { WATCHLIST: 'AAPL,NVDA', MAX_DAILY_LLM_COST_USD: '1' },
+    );
+
+    await agent.runCycle();
+
+    expect(agent.getState().signalsGenerated).toBe(1);
+    expect(agent.llmBudget.spentUsd).toBeCloseTo(2, 6);
+    expect(agent.llmBudget.exhausted).toBe(true);
+  });
+
+  it('analyses nothing at all in a cycle that starts over budget', async () => {
+    const { agent } = await agentWith(documents(), llmCosting(bullishHypothesis, 0.5), {
+      MAX_DAILY_LLM_COST_USD: '1',
+    });
+    // Yesterday's spend, or an earlier cycle's — the agent cannot tell, and
+    // must not analyse either way.
+    agent.llmBudget.record(5);
+
+    await agent.runCycle();
+
+    expect(agent.getState().signalsGenerated).toBe(0);
+    // Not one further dollar: the ceiling is checked before the first call.
+    expect(agent.llmBudget.spentUsd).toBeCloseTo(5, 6);
+
+    const funnel = agent.getFunnels()[0]!;
+    const analysed = funnel.steps.find((step) => step.stage === 'analysed');
+    expect(analysed?.count).toBe(0);
+    expect(Object.keys(analysed?.reasons ?? {}).join()).toContain('budget');
+  });
+
+  it('keeps reading the news while analysis is paused', async () => {
+    // Ingestion costs nothing. Halting it would mean losing the day's news
+    // rather than the day's analysis, and the event store would fall behind.
+    const { agent } = await agentWith(documents(), llmCosting(bullishHypothesis, 0.5), {
+      MAX_DAILY_LLM_COST_USD: '1',
+    });
+    agent.llmBudget.record(5);
+
+    await agent.runCycle();
+
+    const funnel = agent.getFunnels()[0]!;
+    expect(funnel.steps.find((step) => step.stage === 'ingest')?.count).toBeGreaterThan(0);
+    expect(funnel.steps.find((step) => step.stage === 'events')?.count).toBeGreaterThan(0);
   });
 });
 

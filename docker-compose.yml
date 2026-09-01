@@ -39,6 +39,54 @@ services:
       timeout: 5s
       retries: 5
 
+  # The agent itself. `docker compose up -d agent` is the whole deployment.
+  #
+  # Postgres and Redis are deliberately absent from depends_on: nothing here
+  # requires them yet, and making the bot wait on two services it does not use
+  # would turn a healthy run into a startup failure.
+  agent:
+    build: .
+    container_name: market-agent
+    # Survives a crash and a host reboot, which is the entire point of putting
+    # it on a server. Not `always`: a container stopped on purpose stays
+    # stopped, so `docker compose stop agent` means what it says.
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Inside the container, bind to every interface — otherwise the port
+      # published below reaches nothing. Safe because it is published to the
+      # host's loopback only, and because the process refuses to serve a
+      # passwordless dashboard on a non-loopback address at all.
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: '3000'
+    ports:
+      # 127.0.0.1 on the LEFT is what keeps this off the public internet. A VPS
+      # has a public address and no firewall you did not configure; publishing
+      # '3000:3000' here would put the portfolio on the open web behind nothing
+      # but a password. Reach it over an SSH tunnel:
+      #   ssh -L 3000:127.0.0.1:3000 user@your-server
+      - '127.0.0.1:3000:3000'
+    volumes:
+      # The decision journal and the agent's own state. Without this the
+      # portfolio and every recorded decision reset on each deploy, which
+      # destroys exactly what running continuously is meant to accumulate.
+      - agent_data:/app/data
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      # A bot left running for months fills a disk with JSON logs otherwise,
+      # and the first symptom is the agent dying for want of space.
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
 volumes:
   postgres_data:
   redis_data:
+  agent_data:

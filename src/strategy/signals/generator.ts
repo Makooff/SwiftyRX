@@ -40,6 +40,16 @@ export interface GenerationResult {
   signal?: Signal;
   /** Why no signal was produced, when that is the outcome. */
   skipped?: string;
+  /**
+   * What this attempt cost, whenever a call actually reached the provider.
+   *
+   * Reported on every such path, not only the successful one. A refusal and a
+   * malformed response are billed exactly like an answer, and a caller keeping
+   * a spend budget that only counts successes would undercount precisely on
+   * the days something is going wrong. Absent when no call was made, or when
+   * the provider publishes no pricing for the model.
+   */
+  costUsd?: number;
 }
 
 export class SignalGenerator {
@@ -89,8 +99,12 @@ export class SignalGenerator {
       return { skipped: `llm error: ${(err as Error).message}` };
     }
 
+    // Billed from here on, whatever the outcome.
+    const billed =
+      result.usage.estimatedCostUsd !== undefined ? { costUsd: result.usage.estimatedCostUsd } : {};
+
     if (result.refused) {
-      return { skipped: `model declined (${result.refusalCategory ?? 'no category'})` };
+      return { skipped: `model declined (${result.refusalCategory ?? 'no category'})`, ...billed };
     }
 
     const parsed = LlmHypothesis.safeParse(result.value);
@@ -101,7 +115,7 @@ export class SignalGenerator {
         { eventId: event.id, issues: parsed.error.issues.map((i) => i.message) },
         'model output failed schema validation',
       );
-      return { skipped: 'malformed model output' };
+      return { skipped: 'malformed model output', ...billed };
     }
 
     const hypothesis = parsed.data;
@@ -166,6 +180,6 @@ export class SignalGenerator {
       );
     }
 
-    return { signal };
+    return { signal, ...billed };
   }
 }

@@ -217,6 +217,24 @@ the gate that fired rather than the one you assumed did:
 It costs nothing to run: no tokens, no orders, no network. Add `--last 20` for
 the individual decisions and their headlines.
 
+### Running it continuously
+
+`docker compose up -d --build agent` is the whole deployment: the service
+carries a named volume for `data/`, restarts after a host reboot, and publishes
+the dashboard to the host's loopback only. `docs/SERVEUR.md` is a step-by-step
+guide in French for someone who has never administered a server.
+
+Before leaving it unattended, set `MAX_DAILY_LLM_COST_USD`. The price of every
+call has always been estimated and shown per signal; nothing added those
+numbers up and nothing ever stopped. On a laptop, closing the window is the
+budget. On a server there is no window. Past the ceiling the agent keeps
+ingesting, detecting and verifying — all of which cost nothing — and stops
+paying for analysis until the 24-hour window rolls, saying so on the dashboard
+and once on Discord.
+
+The ceiling is not in `TUNABLE_KEYS` and never will be: what you are willing to
+spend is a question about your invoice, not about measured performance.
+
 ### Letting the system recommend its own settings
 
 `npm run tune` reads the same journal and reports which of four states it is in
