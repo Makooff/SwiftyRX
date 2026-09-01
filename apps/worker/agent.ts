@@ -49,6 +49,7 @@ import { observationVerdict } from '../../src/strategy/observation.js';
 import type { MarketContext } from '../../src/intelligence/llm/prompt.js';
 import { detectRegime, type MarketRegime } from '../../src/strategy/regime.js';
 import { SignalGenerator } from '../../src/strategy/signals/generator.js';
+import { SpendBudget } from '../../src/monitoring/spend.js';
 import type { Signal } from '../../src/strategy/signals/types.js';
 
 /**
@@ -157,6 +158,15 @@ export class TradingAgent {
   /** Symbols an order may be placed on — shown to the model, checked against. */
   private readonly tradableUniverse: string[];
 
+  /**
+   * What analysis is allowed to cost per day.
+   *
+   * Public so the dashboard and the doctor can report it. Always present —
+   * a limit of 0 means "no ceiling", which the object itself understands, so
+   * every caller reads one shape instead of branching on undefined.
+   */
+  readonly llmBudget: SpendBudget;
+
   private readonly discord: DiscordNotifier | undefined;
   private readonly approver: DiscordApprover | undefined;
   private readonly stateStore: AgentStateStore | undefined;
@@ -191,6 +201,8 @@ export class TradingAgent {
     this.correlations =
       options.correlations ?? CorrelationGroups.load(options.config.CORRELATION_FILE);
     this.observationOnlySources = new Set(options.config.OBSERVATION_ONLY_SOURCES);
+
+    this.llmBudget = new SpendBudget(options.config.MAX_DAILY_LLM_COST_USD, this.clock);
 
     this.discord =
       options.discord ??
@@ -695,6 +707,31 @@ export class TradingAgent {
     if (candidates.length === 0) return;
 
     // --- Analyse, score, decide -------------------------------------------
+
+    // Before anything is analysed, not after. The point of a daily ceiling is
+    // that it is reached while nobody is watching, so the cycle that finds it
+    // spent must stop rather than place one more call and then notice.
+    //
+    // Ingestion, detection and verification all still run: they cost nothing,
+    // they keep the event store current, and stopping them would mean losing
+    // the day's news rather than the day's analysis.
+    if (this.llmBudget.exhausted) {
+      const { spentUsd, limitUsd } = this.llmBudget.snapshot();
+      funnel.step('analysed', 0, { 'budget d’analyse épuisé pour aujourd’hui': candidates.length });
+      this.activity.warn(
+        'budget',
+        `analysis paused — $${spentUsd} spent of a $${limitUsd} daily ceiling`,
+      );
+      if (this.llmBudget.claimAnnouncement()) {
+        await this.discord?.halted([
+          `Budget d'analyse épuisé : $${spentUsd} dépensés sur un plafond de $${limitUsd} par jour.`,
+          "Le bot continue de lire les actualités, mais n'analyse plus rien jusqu'à demain.",
+          'Pour relever le plafond : MAX_DAILY_LLM_COST_USD dans le .env.',
+        ]);
+      }
+      return;
+    }
+
     const analysed = candidates.slice(0, this.config.MAX_EVENTS_ANALYSED_PER_CYCLE);
     funnel.step(
       'analysed',
@@ -718,6 +755,12 @@ export class TradingAgent {
       try {
         const result = await this.processEvent(event, documents);
         if (result.observationBlocked) observationBlocked += 1;
+        // Recorded inside processEvent, at the call, so a later throw cannot
+        // lose a cost that was already billed. Only the ceiling is read here.
+        //
+        // Checked between events, not only between cycles: five analyses of a
+        // long document can cross the line inside one pass.
+        if (this.llmBudget.exhausted) break;
       } catch (err) {
         this.recordError('analysis', `${event.id}: ${(err as Error).message}`);
       }
@@ -821,11 +864,16 @@ export class TradingAgent {
    * gate is the reason no order followed. That is reported rather than folded
    * into "not tradeable", because "we chose not to trust this source yet" and
    * "there was no price" are different answers to the same silence.
+   *
+   * It also returns what the analysis cost, on every path where a call was
+   * actually billed — including the ones that produced no signal. A budget
+   * that only counted the successes would undercount exactly on the days
+   * something is going wrong.
    */
   private async processEvent(
     event: MarketEvent,
     documents: NormalizedDocument[],
-  ): Promise<{ observationBlocked: boolean }> {
+  ): Promise<{ observationBlocked: boolean; costUsd?: number }> {
     let symbol = event.tickers[0];
     const eventDocuments = documents.filter((doc) => event.documentIds.includes(doc.id));
 
@@ -843,7 +891,7 @@ export class TradingAgent {
     // is shown the same numbers.
     const historical = this.hitRates[event.type];
 
-    const { signal, skipped } = await this.generator.generate({
+    const { signal, skipped, costUsd } = await this.generator.generate({
       event,
       documents: eventDocuments,
       ...(context ? { context } : {}),
@@ -858,6 +906,10 @@ export class TradingAgent {
       logger: this.log,
     });
 
+    // Immediately, and before any branch. Everything below can refuse, throw
+    // or return early; none of that un-bills the call that just happened.
+    this.llmBudget.record(costUsd);
+
     if (!signal) {
       this.log.debug({ eventId: event.id, skipped }, 'no signal produced');
       // The reason no signal came out is the most useful line in the feed: it
@@ -867,7 +919,7 @@ export class TradingAgent {
         'no-signal',
         `${event.type}: ${skipped ?? 'no hypothesis'}`,
       );
-      return { observationBlocked: false };
+      return { observationBlocked: false, ...(costUsd !== undefined ? { costUsd } : {}) };
     }
 
     this.state.signalsGenerated += 1;
@@ -1032,7 +1084,10 @@ export class TradingAgent {
       ...(order ? { order } : {}),
     });
 
-    return { observationBlocked: !observation.trades };
+    return {
+      observationBlocked: !observation.trades,
+      ...(costUsd !== undefined ? { costUsd } : {}),
+    };
   }
 
   /**

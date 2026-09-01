@@ -1,0 +1,30 @@
+# Credentials, first and above all. Without this line COPY . . bakes a real
+# .env into the image — Anthropic key included — and anyone who can pull that
+# image has it. The container receives its configuration through env_file at
+# run time, never through a layer.
+.env
+.env.*
+!.env.example
+!.env.recommande
+
+# Rebuilt inside the image by npm ci, and a host tree may hold binaries for
+# the wrong platform entirely.
+node_modules/
+dist/
+
+# Runtime state belongs in the named volume, not in the image. Copying a
+# journal in would also mean shipping the operator's trading history.
+data/
+.tmp/
+
+# Not needed to run, and .git in particular can carry an accidentally
+# committed secret in its history long after the file was removed.
+.git/
+.github/
+coverage/
+*.log
+
+tests/
+docs/
+*.md
+!README.md

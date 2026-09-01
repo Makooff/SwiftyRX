@@ -140,6 +140,16 @@ const rawSchema = z.object({
    */
   MAX_EVENTS_ANALYSED_PER_CYCLE: num(5),
 
+  /**
+   * Ceiling on what analysis may cost per 24 hours, in USD. 0 = no ceiling.
+   *
+   * Zero by default, which is exactly what the system did before this existed:
+   * estimate every call's price, show it, and never stop. That is survivable
+   * on a laptop, where closing the window is the budget. It is not survivable
+   * on a server nobody is watching.
+   */
+  MAX_DAILY_LLM_COST_USD: num(0),
+
   // ---- Evidence -----------------------------------------------------------
   /**
    * Where `npm run study --out` writes what the event study found, and where
@@ -373,6 +383,9 @@ function assertSafetyInvariants(cfg: z.infer<typeof rawSchema>): string[] {
     if (value < 0 || value > 1) {
       problems.push(`${name} must be between 0 and 1 (got ${value}).`);
     }
+  }
+  if (cfg.MAX_DAILY_LLM_COST_USD < 0) {
+    problems.push('MAX_DAILY_LLM_COST_USD cannot be negative (0 disables the ceiling).');
   }
   if (cfg.MAX_EVENTS_ANALYSED_PER_CYCLE < 1) {
     problems.push('MAX_EVENTS_ANALYSED_PER_CYCLE must be at least 1.');

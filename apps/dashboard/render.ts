@@ -103,6 +103,14 @@ export interface DashboardData {
     }>;
   };
   llmProvider: string;
+  /**
+   * What analysis has cost today against its ceiling.
+   *
+   * Live state, not configuration: the settings panel already says what the
+   * limit is, and the only question worth answering from a phone is how close
+   * to it the day has got. Absent when no ceiling is configured.
+   */
+  budget?: { limitUsd: number; spentUsd: number; remainingUsd: number; exhausted: boolean };
 }
 
 function escapeHtml(value: unknown): string {
@@ -173,6 +181,7 @@ function funnelStepRows(steps: CycleFunnel['steps']): string {
 function briefingFr(
   funnel: CycleFunnel | undefined,
   coverage: DashboardData['coverage'],
+  budget: DashboardData['budget'],
 ): string {
   if (!funnel) {
     return `<p class="say">Aucun cycle n’a encore tourné. Le bot vient de démarrer :
@@ -230,6 +239,22 @@ function briefingFr(
     lines.push('<strong>Aucun ordre passé</strong> : rien n’a paru assez solide pour agir.');
   } else {
     lines.push('<strong>Aucun ordre passé</strong> — il n’y avait rien à analyser.');
+  }
+
+  // The number an operator actually wants from a phone. Only shown when a
+  // ceiling exists: "$0.42 spent" against nothing is trivia, whereas "$0.42 of
+  // $5" is a decision about whether tomorrow needs a bigger budget.
+  if (budget && budget.limitUsd > 0) {
+    lines.push(
+      budget.exhausted
+        ? `<strong>Budget d’analyse épuisé</strong> : $${budget.spentUsd} dépensés sur ` +
+            `$${budget.limitUsd} par jour. Le bot continue de lire les actualités mais ` +
+            'n’analyse plus rien jusqu’à demain. Pour relever le plafond : ' +
+            '<span class="mono">MAX_DAILY_LLM_COST_USD</span> dans le ' +
+            '<span class="mono">.env</span>.'
+        : `Analyse : <strong>$${budget.spentUsd}</strong> dépensés aujourd’hui sur ` +
+            `un plafond de $${budget.limitUsd}.`,
+    );
   }
 
   // Stated here because the alternative is that nobody reads it. The health
@@ -774,7 +799,7 @@ export function renderDashboard(data: DashboardData): string {
 
   <section>
     <h2>Où en est le bot</h2>
-    ${briefingFr(latestFunnel, data.coverage)}
+    ${briefingFr(latestFunnel, data.coverage, data.budget)}
   </section>
 
   <section>

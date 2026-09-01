@@ -72,6 +72,14 @@ function settingsRows(config: AppConfig): DashboardData['settings'] {
       note: 'how sure we are the claim is true',
     },
     {
+      label: 'Daily analysis budget',
+      value: config.MAX_DAILY_LLM_COST_USD > 0 ? `$${config.MAX_DAILY_LLM_COST_USD} / day` : 'no ceiling',
+      note:
+        config.MAX_DAILY_LLM_COST_USD > 0
+          ? 'past this, analysis pauses until tomorrow'
+          : 'nothing stops the spend — set one before leaving it unattended',
+    },
+    {
       label: 'Events analysed / cycle',
       value: String(config.MAX_EVENTS_ANALYSED_PER_CYCLE),
       note: 'past this, the rest wait for the next cycle',
@@ -149,6 +157,7 @@ function buildDashboardData(agent: TradingAgent, config: AppConfig): DashboardDa
     // dashboard refresh.
     unmeasurableEventTypes: unmeasurableFrom(agent),
     llmProvider: agent.getLlmProviderId(),
+    ...(agent.llmBudget.enforced ? { budget: agent.llmBudget.snapshot() } : {}),
   };
 }
 
