@@ -14,6 +14,13 @@ import { chargerMemoire } from '../src/memory/store.js';
 import { MoteurRisque } from '../src/risk/engine.js';
 import { LIBELLE_SETUP } from '../src/risk/types.js';
 import { BORNES, ECHANTILLON } from '../src/settings.js';
+import { rendreTableauHtml } from '../src/journal/html.js';
+import { jeuDeDemonstration } from '../src/journal/demo.js';
+import { lireArgs, texte } from './args.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
+
+const args = lireArgs();
 
 const journal = new Journal();
 const compte = new Compte();
@@ -23,6 +30,24 @@ const entrees = await journal.lireTout();
 const etat = await compte.charger();
 const stats = bilan(entrees);
 const arrets = new MoteurRisque().conditionsArret(etat);
+
+if (args.html) {
+  // Journal vide : la page montre un jeu d'exemple explicitement marqué. Une
+  // coquille vide ne dirait pas à quoi sert l'écran, et un chiffre inventé
+  // présenté comme réel serait pire que les deux.
+  const donnees = entrees.length === 0
+    ? jeuDeDemonstration()
+    : { etat, bilan: stats, memoire, entrees, arrets, demonstration: false };
+
+  const chemin = texte(args, 'sortie') ?? 'journal/tableau.html';
+  const complet = args.fragment !== true;
+  await mkdir(dirname(chemin), { recursive: true });
+  await writeFile(chemin, rendreTableauHtml(donnees, { complet }), 'utf8');
+  process.stdout.write(
+    `${chemin} écrit${donnees.demonstration ? " — jeu d'exemple, le journal est vide" : ''}\n`,
+  );
+  process.exit(0);
+}
 
 const barre = '─'.repeat(64);
 const l: string[] = ['', barre];

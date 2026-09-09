@@ -20,7 +20,8 @@ Le modèle propose, le code dispose. Le moteur de risque ne lit ni la capture ni
 ## Les commandes
 
 ```
-npm run tableau      l'état du compte en une page
+npm run tableau      l'état du compte, dans le terminal
+npm run tableau:html la même page en HTML, dans journal/tableau.html
 npm run contexte     règles applicables et stats, avant une analyse
 npm run risque       le verdict du moteur, avec toutes ses vérifications
 npm run decision     enregistre une analyse au journal
