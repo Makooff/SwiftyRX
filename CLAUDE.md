@@ -20,6 +20,7 @@ Le modèle propose, le code dispose. Le moteur de risque ne lit ni la capture ni
 ## Les commandes
 
 ```
+npm start            lance l'application sur localhost:4830
 npm run tableau      l'état du compte, dans le terminal
 npm run tableau:html la même page en HTML, dans journal/tableau.html
 npm run contexte     règles applicables et stats, avant une analyse
@@ -56,6 +57,8 @@ src/settings.ts     les bornes, en dur — tout ce qui décide combien d'argent 
 src/risk/           moteur, taille, classification des paires
 src/journal/        journal JSONL, capital, statistiques
 src/memory/         leçons, promotion et rétrogradation des règles
+src/server/         serveur local, prompt d'analyse, appel au modèle
+src/web/            l'interface : page, style, script, formatage
 src/watch/          flux RSS, clôture du texte externe
 .claude/agents/     veille, risque, memoire
 .claude/skills/     analyse, resultat, bilan

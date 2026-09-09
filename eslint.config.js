@@ -4,6 +4,12 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   { ignores: ['dist/**', 'node_modules/**', 'coverage/**'] },
+
+  // L'interface tourne dans un navigateur, pas dans Node.
+  {
+    files: ['src/web/**/*.js'],
+    languageOptions: { globals: { ...globals.browser } },
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

@@ -1,13 +1,1 @@
-{
-  "capital": 1000,
-  "devise": "EUR",
-  "capitalDebutJour": 1000,
-  "capitalDebutSemaine": 1000,
-  "plusHaut": 1000,
-  "positions": [],
-  "tradesAujourdhui": 0,
-  "pertesConsecutives": 0,
-  "jour": "2026-09-09",
-  "semaine": "2026-09-07",
-  "misAJourLe": "2026-09-09T00:00:00.000Z"
-}
+{"capital":1000,"devise":"EUR","capitalDebutJour":1000,"capitalDebutSemaine":1000,"plusHaut":1000,"positions":[],"tradesAujourdhui":0,"pertesConsecutives":0,"jour":"2026-09-09","semaine":"2026-09-07","misAJourLe":"2026-09-09T00:00:00.000Z"}
