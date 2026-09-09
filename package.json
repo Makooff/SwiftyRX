@@ -1,39 +1,30 @@
 {
-  "name": "ai-market-agent",
-  "version": "0.1.0",
+  "name": "copilote-trading",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Experimental autonomous market intelligence system. Paper trading only by default.",
+  "description": "Copilote de trading crypto et forex : analyse de captures, dimensionnement du risque, journal et memoire qui s'adapte.",
   "engines": {
     "node": ">=20.10.0"
   },
   "scripts": {
-    "dev": "tsx watch scripts/dev.ts",
-    "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test": "vitest run",
     "test:watch": "vitest",
-    "config:check": "tsx scripts/check-config.ts",
-    "doctor": "tsx scripts/doctor.ts",
-    "sources:check": "tsx scripts/check-sources.ts",
-    "ingest:once": "tsx scripts/ingest-once.ts",
-    "events:detect": "tsx scripts/detect-events.ts",
-    "paper": "tsx scripts/paper.ts",
-    "backtest": "tsx scripts/backtest.ts",
-    "dashboard": "tsx scripts/dashboard.ts",
-    "study": "tsx scripts/event-study.ts",
-    "correlations": "tsx scripts/correlations.ts",
-    "snapshot": "tsx scripts/snapshot.ts",
-    "why": "tsx scripts/why.ts",
-    "tune": "tsx scripts/tune.ts"
+    "contexte": "tsx scripts/contexte.ts",
+    "risque": "tsx scripts/risque.ts",
+    "decision": "tsx scripts/decision.ts",
+    "resultat": "tsx scripts/resultat.ts",
+    "bilan": "tsx scripts/bilan.ts",
+    "veille": "tsx scripts/veille.ts",
+    "simulation": "tsx scripts/simulation.ts",
+    "tableau": "tsx scripts/tableau.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.117.1",
     "fast-xml-parser": "^5.11.0",
-    "pino": "^9.6.0",
-    "zod": "^3.24.2"
+    "pino": "^9.6.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",

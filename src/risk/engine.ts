@@ -1,314 +1,360 @@
-import type { AppConfig } from '../config/env.js';
-import { type Clock, systemClock } from '../core/clock.js';
-import { createLogger, type Logger } from '../core/logger.js';
-import { instrumentVerdict } from './instrument.js';
-import { sizePosition } from './position-sizing.js';
-import type { PortfolioSnapshot, RiskDecision, RiskRejection, RiskRequest } from './types.js';
-
 /**
- * The Risk Engine.
+ * Le moteur de risque.
  *
- * Independent of the LLM by construction: it takes numbers, applies rules in a
- * fixed order, and returns a decision. It cannot be argued with, and a
- * confident model has no more influence over it than an unconfident one — the
- * score enters only as a sizing input, bounded by the configured caps.
+ * Indépendant du modèle par construction : il prend des nombres, applique des
+ * règles dans un ordre fixe, et rend une décision. On ne peut pas discuter
+ * avec lui.
  *
- * Every check runs and is recorded even after the first failure, so the
- * decision log shows the complete picture rather than the first objection.
+ * Deux propriétés héritées de la version précédente et gardées telles quelles,
+ * parce qu'elles sont ce qui rend le journal lisible six semaines plus tard :
  *
- * Rule order is deliberate: halting conditions (which stop *all* trading)
- * are evaluated before per-order conditions, so an operator reading a
- * rejection sees the most serious reason first.
+ *  - **Toutes les vérifications tournent**, même après le premier refus. Le
+ *    journal montre l'image complète et pas la première objection venue.
+ *  - **Les conditions d'arrêt passent avant les conditions d'ordre**, pour que
+ *    la raison la plus grave apparaisse en premier quand tu relis.
  */
 
-export interface RiskEngineOptions {
-  config: AppConfig;
+import { BORNES } from '../settings.js';
+import { type Clock, systemClock } from '../core/clock.js';
+import { estLiquide, expositionDollar, groupeCorrele, lirePaire } from './instrument.js';
+import { calculerTaille, fraisEnR, ratioGainRisque, risqueRecommande } from './sizing.js';
+import type {
+  DecisionComplete,
+  EtatCompte,
+  Proposition,
+  Refus,
+  Verification,
+} from './types.js';
+
+export interface OptionsMoteur {
   clock?: Clock;
-  logger?: Logger;
-  /** Minimum composite score before an order is considered at all. */
-  minScore?: number;
-  /** Minimum order value; below this, costs dominate. */
-  minNotional?: number;
-  allowFractionalShares?: boolean;
+  /** Frais aller-retour supposés, en % du notionnel. */
+  fraisPct?: number;
 }
 
-export class RiskEngine {
-  private readonly config: AppConfig;
+export class MoteurRisque {
   private readonly clock: Clock;
-  private readonly log: Logger;
-  private readonly minScore: number;
-  private readonly minNotional: number;
-  private readonly allowFractional: boolean;
+  private readonly fraisPct: number;
 
-  /** Client order ids already seen, for duplicate-order protection. */
-  private readonly seenOrderIds = new Set<string>();
-
-  constructor(options: RiskEngineOptions) {
-    this.config = options.config;
+  constructor(options: OptionsMoteur = {}) {
     this.clock = options.clock ?? systemClock;
-    this.log = options.logger ?? createLogger('risk-engine');
-    this.minScore = options.minScore ?? 0.55;
-    this.minNotional = options.minNotional ?? 50;
-    this.allowFractional = options.allowFractionalShares ?? true;
+    this.fraisPct = options.fraisPct ?? BORNES.fraisParDefautPct;
   }
 
   /**
-   * Conditions that stop all trading, independent of any particular order.
-   * Exposed separately so the worker can halt before generating signals.
+   * Ce qui arrête tout le trading, indépendamment de l'ordre proposé.
+   *
+   * Exposé séparément pour qu'on puisse répondre « la journée est finie » sans
+   * même analyser le graphique — c'est plus honnête et ça coûte moins cher que
+   * de produire une analyse complète pour la refuser à la fin.
    */
-  haltingConditions(portfolio: PortfolioSnapshot): RiskRejection[] {
-    const halts: RiskRejection[] = [];
+  conditionsArret(etat: EtatCompte): Refus[] {
+    const arrets: Refus[] = [];
 
-    const dailyLossPercent =
-      portfolio.dayStartValue > 0
-        ? ((portfolio.dayStartValue - portfolio.totalValue) / portfolio.dayStartValue) * 100
+    const perteJourPct =
+      etat.capitalDebutJour > 0
+        ? ((etat.capitalDebutJour - etat.capital) / etat.capitalDebutJour) * 100
         : 0;
-    if (dailyLossPercent >= this.config.MAX_DAILY_LOSS_PERCENT) {
-      halts.push({
-        rule: 'max_daily_loss',
-        message: `daily loss ${dailyLossPercent.toFixed(2)}% reached the ${this.config.MAX_DAILY_LOSS_PERCENT}% limit — trading halted for today`,
-        halting: true,
+    if (perteJourPct >= BORNES.arretJournalierPct) {
+      arrets.push({
+        regle: 'arret_journalier',
+        message: `perte de ${perteJourPct.toFixed(2)} % aujourd'hui, la limite est ${BORNES.arretJournalierPct} % — journée terminée`,
+        bloquant: true,
       });
     }
 
-    if (portfolio.tradesToday >= this.config.MAX_TRADES_PER_DAY) {
-      halts.push({
-        rule: 'max_trades_per_day',
-        message: `${portfolio.tradesToday} trades today reached the limit of ${this.config.MAX_TRADES_PER_DAY}`,
-        halting: true,
+    const perteSemainePct =
+      etat.capitalDebutSemaine > 0
+        ? ((etat.capitalDebutSemaine - etat.capital) / etat.capitalDebutSemaine) * 100
+        : 0;
+    if (perteSemainePct >= BORNES.arretHebdomadairePct) {
+      arrets.push({
+        regle: 'arret_hebdomadaire',
+        message: `perte de ${perteSemainePct.toFixed(2)} % cette semaine, la limite est ${BORNES.arretHebdomadairePct} % — semaine terminée, fais un bilan`,
+        bloquant: true,
       });
     }
 
-    // A cooldown after consecutive losses interrupts the pattern where a
-    // strategy keeps firing into conditions it is currently wrong about.
-    if (portfolio.consecutiveLosses >= 3 && portfolio.lastLossAt) {
-      const minutesSince = (this.clock.nowMs() - Date.parse(portfolio.lastLossAt)) / 60_000;
-      if (minutesSince < this.config.CONSECUTIVE_LOSS_COOLDOWN_MINUTES) {
-        halts.push({
-          rule: 'consecutive_loss_cooldown',
-          message: `${portfolio.consecutiveLosses} consecutive losses — cooling down for another ${Math.ceil(this.config.CONSECUTIVE_LOSS_COOLDOWN_MINUTES - minutesSince)} minutes`,
-          halting: true,
+    const drawdown = etat.plusHaut > 0 ? ((etat.plusHaut - etat.capital) / etat.plusHaut) * 100 : 0;
+    if (drawdown >= BORNES.arretDrawdownPct) {
+      arrets.push({
+        regle: 'drawdown_maximum',
+        message: `drawdown de ${drawdown.toFixed(1)} % depuis le plus haut (${BORNES.arretDrawdownPct} % maximum) — bilan obligatoire avant de reprendre`,
+        bloquant: true,
+      });
+    }
+
+    if (etat.tradesAujourdhui >= BORNES.tradesParJourMax) {
+      arrets.push({
+        regle: 'trades_par_jour',
+        message: `${etat.tradesAujourdhui} trades aujourd'hui, la limite est ${BORNES.tradesParJourMax}`,
+        bloquant: true,
+      });
+    }
+
+    // La pause après une série de pertes interrompt le schéma où on insiste
+    // dans des conditions sur lesquelles on vient d'avoir tort trois fois.
+    if (etat.pertesConsecutives >= BORNES.pertesAvantPause && etat.dernierePerteLe) {
+      const minutes = (this.clock.nowMs() - Date.parse(etat.dernierePerteLe)) / 60_000;
+      if (minutes < BORNES.pauseMinutes) {
+        arrets.push({
+          regle: 'pause_apres_pertes',
+          message: `${etat.pertesConsecutives} pertes d'affilée — pause encore ${Math.ceil(BORNES.pauseMinutes - minutes)} minutes`,
+          bloquant: true,
         });
       }
     }
 
-    return halts;
-  }
-
-  evaluate(request: RiskRequest, portfolio: PortfolioSnapshot): RiskDecision {
-    const checks: RiskDecision['checks'] = [];
-    const rejections: RiskRejection[] = [];
-    const decidedAt = this.clock.now().toISOString();
-
-    const check = (rule: string, passed: boolean, detail: string, halting = false) => {
-      checks.push({ rule, passed, detail });
-      if (!passed) rejections.push({ rule, message: detail, halting });
-    };
-
-    const side: 'buy' | 'sell' = request.action === 'SELL' ? 'sell' : 'buy';
-    const reject = (): RiskDecision => ({
-      verdict: 'rejected',
-      quantity: 0,
-      notional: 0,
-      symbol: request.symbol,
-      side,
-      checks,
-      rejections,
-      decidedAt,
-    });
-
-    // --- Halting conditions first ---------------------------------------
-    for (const halt of this.haltingConditions(portfolio)) {
-      checks.push({ rule: halt.rule, passed: false, detail: halt.message });
-      rejections.push(halt);
-    }
-
-    // --- Mode and instrument permissions ---------------------------------
-    check(
-      'trading_mode',
-      this.config.MODE !== 'backtest',
-      `mode is ${this.config.MODE}`,
-    );
-
-    if (this.config.isLive) {
-      check(
-        'asset_allowlist',
-        this.config.ALLOWED_ASSETS.includes(request.symbol),
-        `${request.symbol} ${this.config.ALLOWED_ASSETS.includes(request.symbol) ? 'is' : 'is NOT'} on the live allowlist`,
-      );
-    } else {
-      checks.push({
-        rule: 'asset_allowlist',
-        passed: true,
-        detail: 'not enforced outside live mode',
+    if (etat.positions.length >= BORNES.positionsMax) {
+      arrets.push({
+        regle: 'positions_simultanees',
+        message: `${etat.positions.length} positions déjà ouvertes, la limite est ${BORNES.positionsMax}`,
+        bloquant: true,
       });
     }
 
-    // Enforced in every mode, not only live: paper results that include trades
-    // the real configuration forbids measure a system nobody is allowed to run.
-    const instrument = instrumentVerdict(request.symbol, this.config);
-    check('instrument_permitted', instrument.permitted, instrument.detail);
+    return arrets;
+  }
 
-    check(
-      'direction_permitted',
-      side === 'buy' || this.config.ALLOW_SHORT_SELLING || this.hasPosition(portfolio, request.symbol),
-      side === 'sell' && !this.config.ALLOW_SHORT_SELLING
-        ? 'selling without an existing position requires ALLOW_SHORT_SELLING=true'
-        : `${side} permitted`,
-    );
+  evaluer(p: Proposition, etat: EtatCompte): DecisionComplete {
+    const verifications: Verification[] = [];
+    const refus: Refus[] = [];
+    const decideLe = this.clock.now().toISOString();
 
-    // --- Data quality ----------------------------------------------------
-    check(
-      'price_freshness',
-      request.priceAgeSeconds <= this.config.MAX_QUOTE_STALENESS_SECONDS,
-      `quote is ${Math.round(request.priceAgeSeconds)}s old (limit ${this.config.MAX_QUOTE_STALENESS_SECONDS}s)`,
-    );
-    check('price_sane', request.price > 0 && Number.isFinite(request.price), `price=${request.price}`);
+    const verifier = (regle: string, passe: boolean, detail: string, bloquant = false) => {
+      verifications.push({ regle, passe, detail });
+      if (!passe) refus.push({ regle, message: detail, bloquant });
+    };
 
-    // --- Signal quality --------------------------------------------------
-    check(
-      'min_score',
-      request.score >= this.minScore,
-      `score ${request.score.toFixed(3)} vs minimum ${this.minScore}`,
-    );
-    check(
-      'actionable_direction',
-      request.action === 'BUY' || request.action === 'SELL',
-      `action is ${request.action}`,
-    );
-
-    // --- Duplicate protection --------------------------------------------
-    check(
-      'duplicate_order',
-      !this.seenOrderIds.has(request.clientOrderId),
-      this.seenOrderIds.has(request.clientOrderId)
-        ? `client order id ${request.clientOrderId} was already submitted`
-        : 'client order id is new',
-    );
-
-    if (rejections.length > 0) {
-      this.log.info(
-        { symbol: request.symbol, rules: rejections.map((r) => r.rule) },
-        'order rejected by risk engine',
-      );
-      return reject();
-    }
-
-    // --- Sizing ----------------------------------------------------------
-    const sizing = sizePosition({
-      portfolioValue: portfolio.totalValue,
-      price: request.price,
-      maxSingleTradeRiskPercent: this.config.MAX_SINGLE_TRADE_RISK_PERCENT,
-      maxPositionPercent: this.config.MAX_POSITION_PERCENT,
-      score: request.score,
-      ...(request.volatilityPct !== undefined ? { volatilityPct: request.volatilityPct } : {}),
-      allowFractional: this.allowFractional,
+    const vide = (facteurs: DecisionComplete['facteursRisque'] = []): DecisionComplete => ({
+      verdict: 'refuse',
+      symbole: p.symbole,
+      sens: p.sens,
+      setup: p.setup,
+      risquePct: 0,
+      perteSiStop: 0,
+      quantite: 0,
+      notionnel: 0,
+      levier: 0,
+      ratio: 0,
+      distanceStopPct: 0,
+      fraisEnR: 0,
+      conversionSupposee: false,
+      verifications,
+      refus,
+      facteursRisque: facteurs,
+      decideLe,
     });
 
-    check(
-      'position_sizeable',
-      sizing.quantity > 0,
-      sizing.quantity > 0
-        ? `${sizing.quantity} units, risking ${sizing.riskPercent}% of portfolio`
-        : 'computed size is zero — portfolio too small for this price',
-    );
-    check(
-      'min_notional',
-      sizing.notional >= this.minNotional,
-      `order value ${sizing.notional} vs minimum ${this.minNotional} (below this, costs dominate)`,
-    );
-
-    // --- Portfolio-level exposure ----------------------------------------
-    const existing = this.positionValue(portfolio, request.symbol);
-    const projectedPositionPct =
-      portfolio.totalValue > 0 ? ((existing + sizing.notional) / portfolio.totalValue) * 100 : 100;
-    check(
-      'max_position',
-      projectedPositionPct <= this.config.MAX_POSITION_PERCENT,
-      `position would be ${projectedPositionPct.toFixed(1)}% of portfolio (limit ${this.config.MAX_POSITION_PERCENT}%)`,
-    );
-
-    const currentExposure = portfolio.positions.reduce((sum, p) => sum + Math.abs(p.marketValue), 0);
-    const projectedExposurePct =
-      portfolio.totalValue > 0 ? ((currentExposure + sizing.notional) / portfolio.totalValue) * 100 : 100;
-    check(
-      'max_portfolio_exposure',
-      projectedExposurePct <= this.config.MAX_PORTFOLIO_EXPOSURE_PERCENT,
-      `exposure would be ${projectedExposurePct.toFixed(1)}% (limit ${this.config.MAX_PORTFOLIO_EXPOSURE_PERCENT}%)`,
-    );
-
-    if (request.correlationGroup) {
-      const groupValue = portfolio.positions
-        .filter((p) => p.correlationGroup === request.correlationGroup)
-        .reduce((sum, p) => sum + Math.abs(p.marketValue), 0);
-      const projectedGroupPct =
-        portfolio.totalValue > 0 ? ((groupValue + sizing.notional) / portfolio.totalValue) * 100 : 100;
-      check(
-        'max_correlated_exposure',
-        projectedGroupPct <= this.config.MAX_CORRELATED_EXPOSURE_PERCENT,
-        `"${request.correlationGroup}" exposure would be ${projectedGroupPct.toFixed(1)}% (limit ${this.config.MAX_CORRELATED_EXPOSURE_PERCENT}%)`,
-      );
+    // --- Arrêts d'abord --------------------------------------------------
+    for (const arret of this.conditionsArret(etat)) {
+      verifications.push({ regle: arret.regle, passe: false, detail: arret.message });
+      refus.push(arret);
     }
 
-    check(
-      'sufficient_cash',
-      side === 'sell' || sizing.notional <= portfolio.cash,
-      `order value ${sizing.notional} vs cash ${portfolio.cash.toFixed(2)}`,
+    // --- L'instrument ----------------------------------------------------
+    const paire = lirePaire(p.symbole);
+    verifier(
+      'paire_reconnue',
+      paire !== undefined,
+      paire
+        ? `${paire.symbole} — ${paire.classe}${paire.majeure ? ', majeure' : ''}`
+        : `${p.symbole} n'est ni une paire forex ni une paire crypto reconnue — vérifie le symbole plutôt que de deviner`,
+    );
+    if (!paire) return vide();
+
+    // --- La cohérence du plan --------------------------------------------
+    const sensStopCorrect =
+      p.sens === 'achat' ? p.prixStop < p.prixEntree : p.prixStop > p.prixEntree;
+    verifier(
+      'stop_du_bon_cote',
+      sensStopCorrect,
+      sensStopCorrect
+        ? `stop à ${p.prixStop}, du bon côté d'une ${p.sens === 'achat' ? 'position acheteuse' : 'position vendeuse'}`
+        : `stop à ${p.prixStop} pour une ${p.sens === 'achat' ? 'position acheteuse' : 'position vendeuse'} entrée à ${p.prixEntree} : le plan est incohérent`,
     );
 
-    if (rejections.length > 0) {
-      this.log.info(
-        { symbol: request.symbol, rules: rejections.map((r) => r.rule) },
-        'order rejected by risk engine',
-      );
-      return reject();
+    const sensCibleCorrect =
+      p.sens === 'achat' ? p.prixCible > p.prixEntree : p.prixCible < p.prixEntree;
+    verifier(
+      'cible_du_bon_cote',
+      sensCibleCorrect,
+      sensCibleCorrect ? `cible à ${p.prixCible}` : `cible à ${p.prixCible} du mauvais côté de l'entrée`,
+    );
+
+    verifier(
+      'prix_valides',
+      p.prixEntree > 0 && p.prixStop > 0 && p.prixCible > 0,
+      `entrée ${p.prixEntree}, stop ${p.prixStop}, cible ${p.prixCible}`,
+    );
+
+    if (refus.length > 0) return vide();
+
+    const ratio = ratioGainRisque(p.prixEntree, p.prixStop, p.prixCible);
+    verifier(
+      'ratio_minimum',
+      ratio >= BORNES.ratioMinimum,
+      `rapport gain/risque de ${ratio} (minimum ${BORNES.ratioMinimum})`,
+    );
+
+    // --- Les règles apprises ---------------------------------------------
+    // Elles ne peuvent que refuser ou réduire. Aucune règle apprise ne peut
+    // autoriser un trade que les bornes refusent, ni augmenter la taille.
+    let facteurRegles = 1;
+    for (const regle of p.reglesApprises ?? []) {
+      if (regle.action === 'refuser') {
+        verifier(`regle_${regle.id}`, false, `${regle.id} : ${regle.motif}`);
+      } else {
+        facteurRegles *= 0.5;
+        verifications.push({
+          regle: `regle_${regle.id}`,
+          passe: true,
+          detail: `${regle.id} : ${regle.motif} — taille réduite de moitié`,
+        });
+      }
     }
 
-    // Only now is the id consumed — a rejected order should not burn its own
-    // idempotency key, or a corrected retry would be refused as a duplicate.
-    this.seenOrderIds.add(request.clientOrderId);
+    // --- Le risque --------------------------------------------------------
+    const drawdownPct = etat.plusHaut > 0 ? ((etat.plusHaut - etat.capital) / etat.plusHaut) * 100 : 0;
+    const recommande = risqueRecommande({
+      qualite: p.qualite,
+      pertesConsecutives: etat.pertesConsecutives,
+      drawdownPct,
+      ratio,
+      echantillonSetup: p.echantillonSetup ?? 0,
+      ...(p.esperanceSetup !== undefined ? { esperanceSetup: p.esperanceSetup } : {}),
+      liquide: estLiquide(paire),
+    });
+
+    const facteurs = [...recommande.facteurs];
+    let risquePct = recommande.risquePct * facteurRegles;
+    if (facteurRegles < 1) {
+      facteurs.push({
+        nom: 'regles_apprises',
+        multiplicateur: facteurRegles,
+        detail: 'une ou plusieurs règles apprises demandent une réduction',
+      });
+    }
+
+    verifier(
+      'risque_exploitable',
+      risquePct >= BORNES.risqueMinPct,
+      risquePct >= BORNES.risqueMinPct
+        ? `${risquePct.toFixed(2)} % du capital`
+        : `le risque calculé tombe à ${risquePct.toFixed(2)} %, sous le plancher de ${BORNES.risqueMinPct} % — ce trade ne vaut pas ses frais`,
+    );
+
+    if (refus.length > 0) return vide(facteurs);
+
+    // --- La taille --------------------------------------------------------
+    const taille = calculerTaille({
+      capital: etat.capital,
+      risquePct,
+      prixEntree: p.prixEntree,
+      prixStop: p.prixStop,
+      ...(p.tauxDeviseCompte !== undefined ? { tauxDeviseCompte: p.tauxDeviseCompte } : {}),
+    });
+    verifier(
+      'taille_calculable',
+      taille !== undefined,
+      taille ? `${taille.quantite} unités` : 'entrée et stop au même prix : aucune taille calculable',
+    );
+    if (!taille) return vide(facteurs);
+
+    verifier(
+      'notionnel_minimum',
+      taille.notionnel >= BORNES.notionnelMin,
+      `position de ${taille.notionnel} ${etat.devise} (minimum ${BORNES.notionnelMin} — en dessous, les frais dominent)`,
+    );
+
+    verifier(
+      'levier_maximum',
+      taille.levier <= BORNES.levierMax,
+      `levier ${taille.levier} (maximum ${BORNES.levierMax})`,
+    );
+
+    verifier(
+      'position_maximum',
+      (taille.notionnel / etat.capital) * 100 <= BORNES.positionMaxPct,
+      `la position pèse ${((taille.notionnel / etat.capital) * 100).toFixed(0)} % du capital (maximum ${BORNES.positionMaxPct} %)`,
+    );
+
+    // --- Le risque déjà engagé --------------------------------------------
+    const risqueOuvert = etat.positions.reduce((s, pos) => s + pos.risqueOuvert, 0);
+    const risqueTotalPct = ((risqueOuvert + taille.perteSiStop) / etat.capital) * 100;
+    verifier(
+      'risque_cumule',
+      risqueTotalPct <= BORNES.risqueOuvertMaxPct,
+      `risque total engagé ${risqueTotalPct.toFixed(2)} % (maximum ${BORNES.risqueOuvertMaxPct} %)`,
+    );
+
+    const exposition = etat.positions.reduce((s, pos) => s + pos.notionnel, 0);
+    verifier(
+      'exposition_totale',
+      ((exposition + taille.notionnel) / etat.capital) * 100 <= BORNES.expositionMaxPct,
+      `exposition totale ${(((exposition + taille.notionnel) / etat.capital) * 100).toFixed(0)} % (maximum ${BORNES.expositionMaxPct} %)`,
+    );
+
+    // --- La corrélation ---------------------------------------------------
+    const groupe = groupeCorrele(paire);
+    const memeGroupe = etat.positions
+      .filter((pos) => pos.groupeCorrele === groupe)
+      .reduce((s, pos) => s + pos.notionnel, 0);
+    verifier(
+      'exposition_correlee',
+      ((memeGroupe + taille.notionnel) / etat.capital) * 100 <= BORNES.correlationMaxPct,
+      `exposition « ${groupe} » à ${(((memeGroupe + taille.notionnel) / etat.capital) * 100).toFixed(0)} % (maximum ${BORNES.correlationMaxPct} %)`,
+    );
+
+    // Le dollar est le facteur commun de presque tout ce qui se trade ici.
+    // Trois paires différentes peuvent être le même pari sur le dollar, et
+    // compter les noms plutôt que les expositions le manquerait.
+    const dollarCeTrade = expositionDollar(paire, p.sens);
+    const dollarOuvert = etat.positions.reduce((s, pos) => s + pos.expositionDollar * pos.notionnel, 0);
+    const dollarProjete = dollarOuvert + dollarCeTrade * taille.notionnel;
+    const dollarPct = Math.abs(dollarProjete / etat.capital) * 100;
+    verifier(
+      'exposition_dollar',
+      dollarPct <= BORNES.correlationMaxPct,
+      dollarCeTrade === 0
+        ? 'la paire ne porte pas de dollar'
+        : `exposition nette au dollar ${dollarProjete > 0 ? 'longue' : 'courte'} de ${dollarPct.toFixed(0)} % du capital (maximum ${BORNES.correlationMaxPct} %)`,
+    );
+
+    if (refus.length > 0) return vide(facteurs);
+
+    const frais = fraisEnR(taille.notionnel, taille.perteSiStop, this.fraisPct);
+    if (frais > 0.15) {
+      verifications.push({
+        regle: 'poids_des_frais',
+        passe: true,
+        detail: `les frais représentent ${(frais * 100).toFixed(0)} % du risque — le R affiché sera nettement optimiste`,
+      });
+    }
+
+    risquePct = Number(risquePct.toFixed(3));
 
     return {
-      verdict: 'approved',
-      quantity: sizing.quantity,
-      notional: sizing.notional,
-      symbol: request.symbol,
-      side,
-      checks,
-      rejections: [],
-      stopPrice: sizing.stopPrice,
-      riskPercent: sizing.riskPercent,
-      decidedAt,
+      verdict: facteurRegles < 1 || recommande.risquePct < BORNES.risqueMaxPct ? 'reduit' : 'approuve',
+      symbole: paire.symbole,
+      sens: p.sens,
+      setup: p.setup,
+      risquePct,
+      perteSiStop: taille.perteSiStop,
+      quantite: taille.quantite,
+      notionnel: taille.notionnel,
+      levier: taille.levier,
+      ratio,
+      ...(p.prixCible2 !== undefined
+        ? { ratio2: ratioGainRisque(p.prixEntree, p.prixStop, p.prixCible2) }
+        : {}),
+      distanceStopPct: taille.distanceStopPct,
+      fraisEnR: frais,
+      conversionSupposee: taille.conversionSupposee,
+      verifications,
+      refus: [],
+      facteursRisque: facteurs,
+      decideLe,
     };
-  }
-
-  private hasPosition(portfolio: PortfolioSnapshot, symbol: string): boolean {
-    return portfolio.positions.some((p) => p.symbol === symbol && p.quantity > 0);
-  }
-
-  private positionValue(portfolio: PortfolioSnapshot, symbol: string): number {
-    return portfolio.positions
-      .filter((p) => p.symbol === symbol)
-      .reduce((sum, p) => sum + Math.abs(p.marketValue), 0);
-  }
-
-  /** Test/ops helper: forget submitted order ids. */
-  resetOrderHistory(): void {
-    this.seenOrderIds.clear();
-  }
-
-  /** Submitted order ids, so duplicate protection can survive a restart. */
-  get submittedOrderIds(): string[] {
-    return [...this.seenOrderIds];
-  }
-
-  /**
-   * Re-seed duplicate protection from persisted state.
-   *
-   * Without this, a restart makes every previously submitted order id look
-   * fresh, and a replayed signal places the same order twice.
-   */
-  rememberOrderIds(ids: Iterable<string>): void {
-    for (const id of ids) this.seenOrderIds.add(id);
   }
 }

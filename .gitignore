@@ -1,17 +1,7 @@
 node_modules/
 dist/
-coverage/
-*.log
-
-# Secrets — never commit real credentials
 .env
 .env.*
 !.env.example
-# Thresholds and source lists only. If a credential is ever added here, this
-# exception is what would leak it — so it must stay free of secrets.
-!.env.recommande
-
-# Local runtime state
-data/
-.tmp/
+*.log
 .DS_Store
