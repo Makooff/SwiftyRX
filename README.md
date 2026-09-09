@@ -4,25 +4,26 @@ Un copilote pour trader la crypto et le forex à la main. Tu envoies une capture
 
 Le capital de départ est de 1 000 €.
 
-> **Aucun ordre n'est passé depuis ce dépôt.** Il n'y a pas de connexion à un courtier et il n'y en aura pas. Tu exécutes toi-même, et la décision finale est la tienne.
+C'est une application web qui tourne sur ta machine. Tu la lances, elle s'ouvre dans ton navigateur.
+
+> **Aucun ordre n'est passé depuis cette application.** Il n'y a pas de connexion à un courtier et il n'y en aura pas. Tu exécutes toi-même, et la décision finale est la tienne.
 
 ---
 
 ## La boucle
 
 ```
-tu envoies une capture
+tu déposes une capture dans la page
         ↓
-  veille    ce qui bouge la paire, sourcé et daté
-  mémoire   les règles apprises qui s'appliquent
+  mémoire   l'état du compte et les règles apprises, chargés avant l'appel
         ↓
-  Claude lit le graphique : setup, niveaux, qualité de 0 à 1
+  Claude lit le graphique : paire, prix, setup, niveaux, qualité de 0 à 1
         ↓
   risque    le % à risquer, la taille, ou un refus motivé   ← code, pas jugement
         ↓
-  VERDICT + écriture au journal
+  VERDICT à l'écran + écriture au journal
         ↓
-  tu rapportes le résultat
+  tu rapportes le résultat depuis la même page
         ↓
   capital · grille du pourquoi · leçon
         ↓
@@ -33,21 +34,25 @@ tu envoies une capture
 
 ```bash
 npm install
-npm run simulation      # vérifie que tout marche, sans toucher à tes données
-npm run tableau         # l'état du compte, dans le terminal
-npm run tableau:html    # le même écran en page web, à ouvrir dans un navigateur
+cp .env.exemple .env    # puis mets ta clé Anthropic dedans
+npm start               # ouvre http://localhost:4830
 ```
 
-`tableau:html` écrit `journal/tableau.html` : une page unique, sans serveur, qui se régénère à partir du journal. Tant que le journal est vide, elle montre un jeu d'exemple **marqué comme tel** — une coquille vide ne dirait pas à quoi sert l'écran.
+Sous Windows, double-clique `Lancer.bat` : il installe, démarre et ouvre le navigateur.
 
-Puis, dans Claude Code, envoie une capture de graphique et demande. Les skills se déclenchent seules.
+Ta clé se crée sur [console.anthropic.com](https://console.anthropic.com/settings/keys). Elle reste dans ton `.env`, qui n'est jamais commité.
+
+Ensuite : dépose ta capture de graphique dans la page, ou colle-la avec Ctrl+V.
 
 ## Les commandes
 
+L'application couvre toute la boucle. Ces commandes servent quand tu préfères le terminal, ou pour vérifier.
+
 | Commande | Ce qu'elle fait |
 |---|---|
+| `npm start` | Lance l'application sur `localhost:4830` |
 | `npm run tableau` | Capital, positions, statistiques, règles, dans le terminal |
-| `npm run tableau:html` | La même chose en page web, dans `journal/tableau.html` |
+| `npm run tableau:html` | Une page statique du tableau, dans `journal/tableau.html` |
 | `npm run contexte` | Ce que la mémoire sait, avant une analyse |
 | `npm run risque` | Le verdict du moteur, avec toutes ses vérifications |
 | `npm run decision` | Enregistre une analyse au journal |
@@ -101,6 +106,10 @@ Les garde-fous du mécanisme, parce que c'est là qu'un système comme celui-ci 
 
 La grille d'analyse tient en cinq questions, et la quatrième distingue le processus du résultat. Un bon trade peut perdre, un mauvais peut gagner, et confondre les deux fait apprendre l'inverse de ce qu'il faut.
 
+## Ce que ça coûte
+
+Chaque analyse est un appel à l'API Anthropic, facturé à l'usage sur ta clé. Une capture plus le contexte du compte représente quelques milliers de jetons en entrée. La consigne d'analyse ne change jamais et passe en cache, ce qui fait baisser le coût des appels suivants.
+
 ## D'où vient le prix
 
 De ta capture, ou de ta saisie. Jamais du web.
@@ -116,7 +125,7 @@ Tout texte récupéré est clôturé avant d'atteindre un modèle. Une dépêche
 ## Vérifier
 
 ```bash
-npm run typecheck && npm run lint && npm test   # 107 tests, hors ligne
+npm run typecheck && npm run lint && npm test   # 145 tests, hors ligne
 npm run simulation                              # 17 vérifications de bout en bout
 ```
 

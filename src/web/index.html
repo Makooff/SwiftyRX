@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Copilote de trading</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230e1219'/%3E%3Cpath d='M5 22 L12 15 L17 19 L27 8' fill='none' stroke='%23d6a75e' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main class="page">
+
+  <div>
+    <p class="eyebrow">crypto · forex · journal à mémoire</p>
+    <h1>Copilote de trading</h1>
+  </div>
+
+  <section id="barre" class="barre" aria-live="polite">
+    <div class="capital">
+      <span class="eyebrow">capital</span>
+      <span class="montant" id="capital">—</span>
+      <span class="mono" id="variation" style="font-size:12.5px;color:var(--doux)"></span>
+    </div>
+    <dl class="compteurs" id="compteurs"></dl>
+  </section>
+
+  <div id="arrets"></div>
+
+  <section class="depot">
+    <h2>Analyser un graphique</h2>
+    <p class="vide">Dépose ta capture, colle-la avec Ctrl+V, ou clique pour la choisir. Il faut que la paire, l'unité de temps et le prix soient lisibles.</p>
+
+    <div class="cible" id="cible" role="button" tabindex="0" aria-label="Déposer une capture d'écran de graphique">
+      <strong>Dépose ou colle ta capture</strong>
+      <small>PNG, JPEG ou WebP</small>
+    </div>
+    <input type="file" id="fichier" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+
+    <div class="champs">
+      <input type="text" id="indice" placeholder="Précision facultative : « BTC/USD en 15 min », « je vise le range du dessus »…">
+      <button id="analyser" disabled>Analyser</button>
+      <button class="discret" id="effacer" hidden>Retirer l'image</button>
+    </div>
+
+    <div id="etatAnalyse"></div>
+  </section>
+
+  <div id="verdict"></div>
+
+  <section class="bloc" id="blocAttente" hidden>
+    <div class="tete">
+      <h2>Trades sans résultat</h2>
+      <span class="compte" id="compteAttente"></span>
+    </div>
+    <p class="vide">Tant que le résultat manque, le trade ne compte dans aucune statistique.</p>
+    <div class="cartes" id="attente"></div>
+  </section>
+
+  <section class="bloc">
+    <div class="tete">
+      <h2>Journal</h2>
+      <span class="compte" id="compteJournal"></span>
+      <button class="discret" id="bilan">Faire le bilan</button>
+    </div>
+    <div id="resumeBilan"></div>
+    <div class="defile" id="journal"></div>
+  </section>
+
+  <section class="bloc">
+    <div class="tete">
+      <h2>Règles apprises</h2>
+      <span class="compte" id="compteRegles"></span>
+    </div>
+    <p class="vide">Une règle ne peut que refuser un trade ou réduire sa taille. Aucune ne peut en autoriser un que les bornes refusent.</p>
+    <div class="cartes" id="regles"></div>
+  </section>
+
+  <section class="bloc">
+    <h2>Leçons récentes</h2>
+    <div class="cartes" id="lecons"></div>
+  </section>
+
+  <footer>
+    Aucun ordre n'est passé depuis cette application. Tu exécutes toi-même, et la décision finale est la tienne.
+    Le prix vient de ta capture, jamais du web.
+  </footer>
+
+</main>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

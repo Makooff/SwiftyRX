@@ -21,11 +21,15 @@
     "veille": "tsx scripts/veille.ts",
     "simulation": "tsx scripts/simulation.ts",
     "tableau": "tsx scripts/tableau.ts",
-    "tableau:html": "tsx scripts/tableau.ts --html"
+    "tableau:html": "tsx scripts/tableau.ts --html",
+    "start": "tsx scripts/serveur.ts",
+    "dev": "tsx watch scripts/serveur.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
     "fast-xml-parser": "^5.11.0",
-    "pino": "^9.6.0"
+    "pino": "^9.6.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",
