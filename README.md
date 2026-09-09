@@ -132,8 +132,9 @@ La simulation rejoue une séquence écrite dans un dossier temporaire et vérifi
 
 Ce dépôt contenait auparavant un agent autonome pour actions américaines : ingestion de dépêches, détection d'événements, scoring, paper trading, backtest. Son moteur de risque, son journal en ajout seul et son ingestion officielle ont été repris ici ; le reste a été retiré.
 
-L'état d'avant est conservé sous le tag git `archive/ai-market-agent`.
+L'état d'avant est intact dans l'historique git, au commit `aeab2bb`, qui est aussi le dernier commit de `main` avant cette réécriture. Rien n'est perdu.
 
 ```bash
-git show archive/ai-market-agent --stat
+git show aeab2bb --stat          # ce que contenait le dépôt
+git checkout aeab2bb -- src/     # récupérer un fichier au besoin
 ```
