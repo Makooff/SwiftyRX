@@ -33,9 +33,12 @@ tu envoies une capture
 
 ```bash
 npm install
-npm run simulation    # vérifie que tout marche, sans toucher à tes données
-npm run tableau       # l'état du compte
+npm run simulation      # vérifie que tout marche, sans toucher à tes données
+npm run tableau         # l'état du compte, dans le terminal
+npm run tableau:html    # le même écran en page web, à ouvrir dans un navigateur
 ```
+
+`tableau:html` écrit `journal/tableau.html` : une page unique, sans serveur, qui se régénère à partir du journal. Tant que le journal est vide, elle montre un jeu d'exemple **marqué comme tel** — une coquille vide ne dirait pas à quoi sert l'écran.
 
 Puis, dans Claude Code, envoie une capture de graphique et demande. Les skills se déclenchent seules.
 
@@ -43,7 +46,8 @@ Puis, dans Claude Code, envoie une capture de graphique et demande. Les skills s
 
 | Commande | Ce qu'elle fait |
 |---|---|
-| `npm run tableau` | Capital, positions, statistiques, règles, en une page |
+| `npm run tableau` | Capital, positions, statistiques, règles, dans le terminal |
+| `npm run tableau:html` | La même chose en page web, dans `journal/tableau.html` |
 | `npm run contexte` | Ce que la mémoire sait, avant une analyse |
 | `npm run risque` | Le verdict du moteur, avec toutes ses vérifications |
 | `npm run decision` | Enregistre une analyse au journal |
