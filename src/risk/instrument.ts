@@ -1,108 +1,159 @@
 /**
- * What kind of instrument is this symbol, and are we allowed to trade it?
+ * Reconnaître ce qu'on regarde à partir de son nom.
  *
- * `.env.example` promises that crypto, options, derivatives and margin are all
- * off by default. Until this file existed that promise was decorative:
- * ALLOW_CRYPTO and its siblings were parsed, cross-validated against each other,
- * printed by `npm run config:check` — and read by no code path that could refuse
- * an order. A watchlist entry of `DOGE/USD` would have been sized, risk-checked
- * and filled with ALLOW_CRYPTO=false, and nothing would have said otherwise.
+ * L'ancienne version de ce fichier classait `EUR/USD` en **crypto**, parce que
+ * `USD` figurait dans sa liste de devises de cotation crypto et qu'aucune
+ * classe forex n'existait. Le bug était sans conséquence tant que le système
+ * ne tradait que des actions américaines ; il en a une ici, où le forex est la
+ * moitié du sujet. C'est le premier cas de test du fichier.
  *
- * The direction of the guarantee matters. This classifier does NOT try to prove
- * a symbol is an equity — that is unprovable from a string. It positively
- * identifies the *restricted* shapes and refuses them unless their flag is on.
- * A venue using a convention not listed here would be classified `equity` and
- * pass, so this is a floor and not a ceiling: for real money, ALLOWED_ASSETS
- * remains the hard control, because it is an allowlist rather than a pattern.
+ * Deuxième changement : la notation collée est acceptée. L'ancienne version la
+ * refusait avec une bonne raison — `BTCUSD` ne se distingue pas d'un ticker
+ * d'action sans liste de places de marché. Cette raison a disparu avec les
+ * actions. Or les captures TradingView affichent `BTCUSDT` et `EURUSD` sans
+ * séparateur, et refuser de les lire aurait voulu dire refuser la source de
+ * données principale du système.
+ *
+ * La découpe reste prudente : elle n'essaie une paire collée que si les deux
+ * moitiés sont des codes connus. `AAPL` ne se découpe pas et n'est pas reconnu.
  */
 
-export type InstrumentClass = 'equity' | 'crypto' | 'option';
+export type ClasseActif = 'crypto' | 'forex' | 'metal' | 'inconnu';
+
+/** Devises souveraines. Les huit majeures d'abord, puis les croisées courantes. */
+const DEVISES = new Set([
+  'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD',
+  'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'TRY', 'ZAR',
+  'MXN', 'SGD', 'HKD', 'CNH', 'CNY', 'INR', 'BRL', 'RUB',
+]);
+
+/** Les huit majeures : celles dont les paires ont un spread serré et de la profondeur. */
+const MAJEURES = new Set(['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD']);
+
+/** Métaux cotés comme des devises. L'or se trade comme une paire, pas comme une action. */
+const METAUX = new Set(['XAU', 'XAG', 'XPT', 'XPD']);
+
+/** Stablecoins : une cotation en USDT est une cotation en dollar, pour ce qui nous occupe. */
+const STABLES = new Set(['USDT', 'USDC', 'DAI', 'TUSD', 'FDUSD', 'BUSD']);
 
 /**
- * Quote currencies that make a pair a crypto pair rather than a ticker.
+ * Cryptos reconnues comme *base*.
  *
- * Deliberately short. `BTC/USD` is unambiguous; a bare `BTC` is not — it is
- * also a listed equity ticker on several exchanges, and guessing would refuse
- * legitimate orders. The separator is what carries the meaning.
+ * Liste volontairement courte : les paires liquides. Une base inconnue cotée
+ * contre une devise ou un stablecoin est quand même classée crypto — c'est le
+ * cas d'un altcoin récent — mais elle ne bénéficie d'aucune reconnaissance
+ * particulière et le moteur de risque le signale.
  */
-const CRYPTO_QUOTES = new Set(['USD', 'USDT', 'USDC', 'EUR', 'BTC', 'ETH', 'SOL', 'DAI']);
+const CRYPTOS = new Set([
+  'BTC', 'XBT', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'DOT',
+  'MATIC', 'LINK', 'LTC', 'TRX', 'ATOM', 'UNI', 'ARB', 'OP', 'SUI', 'TON',
+]);
 
-/**
- * Occidental-convention option symbol: root, 6-digit expiry, C or P, 8-digit
- * strike — e.g. AAPL260116C00150000. Nothing else in this system produces a
- * 15+ character symbol ending in eight digits.
- */
-const OCC_OPTION = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
+const SEPARE = /^([A-Z0-9]{2,10})[/\-_ .]([A-Z0-9]{2,10})$/;
 
-/**
- * Pair notation: BTC/USD, BTC-USD, BTC_USD. Not BTCUSD — concatenation cannot
- * be told apart from a ticker without a venue list, and a wrong guess here
- * refuses real equity orders.
- */
-const PAIR = /^([A-Z0-9]{2,15})[/\-_]([A-Z]{3,5})$/;
-
-export function classifyInstrument(symbol: string): InstrumentClass {
-  const upper = symbol.trim().toUpperCase();
-
-  if (OCC_OPTION.test(upper)) return 'option';
-
-  const pair = PAIR.exec(upper);
-  if (pair && CRYPTO_QUOTES.has(pair[2]!)) return 'crypto';
-
-  return 'equity';
+export interface Paire {
+  /** Écriture normalisée, toujours avec une barre : `BTC/USD`, `EUR/USD`. */
+  symbole: string;
+  base: string;
+  cotation: string;
+  classe: ClasseActif;
+  /** Vrai pour une paire forex dont les deux jambes sont des majeures. */
+  majeure: boolean;
 }
 
-export interface InstrumentPermissions {
-  ALLOW_CRYPTO: boolean;
-  ALLOW_OPTIONS: boolean;
-  ALLOW_DERIVATIVES: boolean;
-}
-
-export interface InstrumentVerdict {
-  permitted: boolean;
-  instrument: InstrumentClass;
-  detail: string;
-}
-
-/**
- * The gate itself.
- *
- * Options need both flags on purpose: an option is a derivative, so
- * ALLOW_OPTIONS alone would let one class of derivative through a switch that
- * claims to govern all of them. `loadConfig` already refuses that combination
- * at startup; this repeats it at the order boundary, for the same reason live
- * trading is checked twice — one check is one mistake away.
- */
-export function instrumentVerdict(
-  symbol: string,
-  permissions: InstrumentPermissions,
-): InstrumentVerdict {
-  const instrument = classifyInstrument(symbol);
-
-  if (instrument === 'crypto' && !permissions.ALLOW_CRYPTO) {
-    return {
-      permitted: false,
-      instrument,
-      detail: `${symbol} is a crypto pair and ALLOW_CRYPTO is false`,
-    };
+function classer(base: string, cotation: string): ClasseActif {
+  if (METAUX.has(base) && (DEVISES.has(cotation) || STABLES.has(cotation))) return 'metal';
+  if (DEVISES.has(base) && DEVISES.has(cotation)) return 'forex';
+  if (CRYPTOS.has(base) && (DEVISES.has(cotation) || STABLES.has(cotation) || CRYPTOS.has(cotation))) {
+    return 'crypto';
   }
+  if (STABLES.has(base) || CRYPTOS.has(cotation) || STABLES.has(cotation)) return 'crypto';
+  return 'inconnu';
+}
 
-  if (instrument === 'option') {
-    if (!permissions.ALLOW_OPTIONS) {
-      return {
-        permitted: false,
-        instrument,
-        detail: `${symbol} is an option contract and ALLOW_OPTIONS is false`,
-      };
-    }
-    if (!permissions.ALLOW_DERIVATIVES) {
-      return {
-        permitted: false,
-        instrument,
-        detail: `${symbol} is an option contract and ALLOW_DERIVATIVES is false`,
-      };
-    }
+/**
+ * Découper une paire écrite d'un seul tenant.
+ *
+ * On essaie les coupes de 3 à 5 caractères sur la cotation, la plus longue
+ * d'abord : `BTCUSDT` doit donner `BTC`/`USDT` et non `BTCU`/`SDT`. Une coupe
+ * n'est retenue que si elle produit une classe connue.
+ */
+function decouper(texte: string): { base: string; cotation: string } | undefined {
+  for (const taille of [4, 5, 3]) {
+    if (texte.length <= taille) continue;
+    const base = texte.slice(0, texte.length - taille);
+    const cotation = texte.slice(texte.length - taille);
+    if (classer(base, cotation) !== 'inconnu') return { base, cotation };
   }
+  return undefined;
+}
 
-  return { permitted: true, instrument, detail: `${symbol} is ${instrument}, permitted` };
+/**
+ * Lire un symbole tel qu'il apparaît sur une capture d'écran.
+ *
+ * Rend `undefined` plutôt que de deviner. Un symbole non reconnu doit
+ * provoquer une question à l'utilisateur, jamais une supposition : se tromper
+ * de classe d'actif fausse la taille de position, donc le risque réel.
+ */
+export function lirePaire(symbole: string): Paire | undefined {
+  const brut = symbole.trim().toUpperCase().replace(/^(BINANCE|BYBIT|OANDA|FX|COINBASE|KRAKEN):/, '');
+  if (!brut) return undefined;
+
+  const separe = SEPARE.exec(brut);
+  const parts = separe
+    ? { base: separe[1]!, cotation: separe[2]! }
+    : decouper(brut.replace(/[^A-Z0-9]/g, ''));
+
+  if (!parts) return undefined;
+
+  const classe = classer(parts.base, parts.cotation);
+  if (classe === 'inconnu') return undefined;
+
+  return {
+    symbole: `${parts.base}/${parts.cotation}`,
+    base: parts.base,
+    cotation: parts.cotation,
+    classe,
+    majeure: classe === 'forex' && MAJEURES.has(parts.base) && MAJEURES.has(parts.cotation),
+  };
+}
+
+/**
+ * Le groupe corrélé auquel une paire appartient.
+ *
+ * Sert à empêcher de prendre trois fois le même pari sous trois noms. Toutes
+ * les cryptos majeures suivent le bitcoin d'assez près pour compter comme une
+ * seule exposition ; l'or a sa propre logique ; le forex est traité par
+ * l'exposition dollar ci-dessous, plus fine que le groupe.
+ */
+export function groupeCorrele(paire: Paire): string {
+  if (paire.classe === 'crypto') return 'crypto';
+  if (paire.classe === 'metal') return 'metaux';
+  return `fx:${[paire.base, paire.cotation].sort().join('')}`;
+}
+
+/**
+ * Exposition au dollar d'une position, en signe.
+ *
+ * +1 : la position gagne si le dollar monte. −1 : elle gagne s'il baisse.
+ * 0 : la paire ne comporte pas de dollar.
+ *
+ * Acheter EUR/USD et acheter USD/JPY sont deux paris **opposés** sur le
+ * dollar ; un simple comptage par groupe les additionnerait comme deux fois le
+ * même risque, ce qui est faux dans les deux sens. Cette fonction existe pour
+ * que le moteur de risque cumule des expositions et non des noms.
+ */
+export function expositionDollar(paire: Paire, sens: 'achat' | 'vente'): -1 | 0 | 1 {
+  const signe = sens === 'achat' ? 1 : -1;
+  const estDollarCotation = paire.cotation === 'USD' || STABLES.has(paire.cotation);
+  if (paire.base === 'USD') return signe as -1 | 1;
+  if (estDollarCotation) return -signe as -1 | 1;
+  return 0;
+}
+
+/** Vrai si la paire est suffisamment liquide pour qu'un stop serré ait un sens. */
+export function estLiquide(paire: Paire): boolean {
+  if (paire.classe === 'metal') return true;
+  if (paire.classe === 'forex') return paire.majeure;
+  return CRYPTOS.has(paire.base);
 }

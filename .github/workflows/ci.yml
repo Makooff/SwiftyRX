@@ -5,9 +5,9 @@ on:
     branches: [main]
   pull_request:
 
-# The whole suite runs offline by design — no adapter test may touch the
-# network. If a job here ever needs a secret to pass, that is a bug in the test,
-# not a missing secret.
+# Toute la suite tourne hors ligne, par construction : aucun test ne touche au
+# réseau. Si un job avait besoin d'un secret pour passer, ce serait un bug du
+# test, pas un secret manquant.
 permissions:
   contents: read
 
@@ -19,8 +19,6 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      # These emit a Node 20 deprecation warning. The run is unaffected today;
-      # bump both to the current major when you next touch this file.
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -39,12 +37,8 @@ jobs:
       - name: Test
         run: npm test
 
-      # Proves the safety gate still holds on a clean checkout: default config
-      # must be paper, with live trading off.
-      - name: Safety posture
-        run: npm run config:check
-
-      # A backtest on synthetic bars needs no credentials and catches a broken
-      # engine that the unit tests might not.
-      - name: Backtest smoke test
-        run: npm run backtest -- --fixture --symbol AAPL --years 2
+      # Rejoue une séquence écrite de trades et vérifie le capital, les arrêts,
+      # la promotion d'une règle et sa rétrogradation. Attrape ce que les tests
+      # unitaires laissent passer : le comportement du système bout en bout.
+      - name: Simulation
+        run: npm run simulation

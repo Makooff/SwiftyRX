@@ -1,553 +1,315 @@
 import { describe, expect, it } from 'vitest';
-import { loadConfig, type AppConfig, LIVE_CONFIRMATION_PHRASE } from '../src/config/env.js';
-import { FixedClock } from '../src/core/clock.js';
-import { RiskEngine } from '../src/risk/engine.js';
-import { sizePosition, stopDistancePct } from '../src/risk/position-sizing.js';
-import type { PortfolioSnapshot, RiskRequest } from '../src/risk/types.js';
-import { assertLiveTradingAllowed, createLiveBroker, LiveTradingBlockedError } from '../src/execution/live/live-broker.js';
-import { AlpacaBroker } from '../src/execution/live/alpaca-broker.js';
-import { BrokerRejectionError } from '../src/execution/broker/types.js';
-import type { FetchImpl } from '../src/core/http.js';
-import { MarketDataService } from '../src/ingestion/market_data/index.js';
-import { FixtureMarketDataAdapter } from '../src/ingestion/market_data/fixture.js';
+import { MoteurRisque } from '../src/risk/engine.js';
+import { calculerTaille, fraisEnR, ratioGainRisque, risqueRecommande } from '../src/risk/sizing.js';
+import { BORNES } from '../src/settings.js';
+import type { EtatCompte, Proposition } from '../src/risk/types.js';
 
-/**
- * Risk Engine tests.
- *
- * These are the guardrails between a confident model and the account. Each one
- * describes a way money gets lost that the engine is supposed to prevent.
- */
+const compteSain: EtatCompte = {
+  capital: 1000,
+  devise: 'EUR',
+  capitalDebutJour: 1000,
+  capitalDebutSemaine: 1000,
+  plusHaut: 1000,
+  positions: [],
+  tradesAujourdhui: 0,
+  pertesConsecutives: 0,
+};
 
-const clock = FixedClock.at('2026-08-16T12:00:00Z');
+const proposition: Proposition = {
+  symbole: 'BTC/USD',
+  sens: 'achat',
+  setup: 'retest',
+  qualite: 0.7,
+  prixEntree: 78400,
+  prixStop: 77950,
+  prixCible: 79500,
+};
 
-function config(overrides: Record<string, string> = {}): AppConfig {
-  return loadConfig({ ...overrides });
-}
-
-function portfolio(overrides: Partial<PortfolioSnapshot> = {}): PortfolioSnapshot {
-  return {
-    cash: 10_000,
-    currency: 'EUR',
-    positions: [],
-    totalValue: 10_000,
-    dayStartValue: 10_000,
-    peakValue: 10_000,
-    realisedPnlToday: 0,
-    tradesToday: 0,
-    consecutiveLosses: 0,
-    ...overrides,
-  };
-}
-
-function request(overrides: Partial<RiskRequest> = {}): RiskRequest {
-  return {
-    symbol: 'AAPL',
-    action: 'BUY',
-    score: 0.8,
-    price: 200,
-    priceAgeSeconds: 5,
-    volatilityPct: 25,
-    clientOrderId: `order-${Math.random()}`,
-    ...overrides,
-  };
-}
-
-describe('position sizing', () => {
-  it('derives the stop distance from volatility, within bounds', () => {
-    expect(stopDistancePct(undefined)).toBe(5);
-    expect(stopDistancePct(16)).toBeGreaterThanOrEqual(2);
-    expect(stopDistancePct(400)).toBeLessThanOrEqual(15);
-  });
-
-  it('sizes so that hitting the stop costs at most the risk budget', () => {
-    const result = sizePosition({
-      portfolioValue: 10_000,
-      price: 100,
-      maxSingleTradeRiskPercent: 1,
-      maxPositionPercent: 20,
-      score: 1,
-      volatilityPct: 30,
+describe('risqueRecommande', () => {
+  it('ne dépasse jamais le plafond, même à qualité maximale', () => {
+    const d = risqueRecommande({
+      qualite: 1,
+      pertesConsecutives: 0,
+      drawdownPct: 0,
+      ratio: 5,
+      echantillonSetup: 100,
+      esperanceSetup: 2,
+      liquide: true,
     });
-    expect(result.riskPercent).toBeLessThanOrEqual(1.001);
-    expect(result.quantity).toBeGreaterThan(0);
+    expect(d.risquePct).toBeLessThanOrEqual(BORNES.risqueMaxPct);
   });
 
-  it('never exceeds the position cap', () => {
-    const result = sizePosition({
-      portfolioValue: 10_000,
-      price: 10,
-      maxSingleTradeRiskPercent: 5,
-      maxPositionPercent: 20,
-      score: 1,
-      volatilityPct: 5,
+  it("n'a aucun facteur supérieur à 1", () => {
+    // C'est l'invariant central : rien ne peut augmenter la mise. Une série
+    // gagnante n'a pas de chemin vers une position plus grosse.
+    const d = risqueRecommande({
+      qualite: 1,
+      pertesConsecutives: 0,
+      drawdownPct: 0,
+      ratio: 10,
+      echantillonSetup: 50,
+      esperanceSetup: 3,
+      liquide: true,
     });
-    expect(result.notional).toBeLessThanOrEqual(2000.01);
-    expect(result.boundBy).toBe('position_cap');
-  });
-
-  it('scales size with score but never above the cap', () => {
-    const base = { portfolioValue: 10_000, maxSingleTradeRiskPercent: 1, maxPositionPercent: 50, price: 100 };
-    const low = sizePosition({ ...base, score: 0.1, volatilityPct: 30 });
-    const high = sizePosition({ ...base, score: 1, volatilityPct: 30 });
-    expect(high.quantity).toBeGreaterThan(low.quantity);
-    expect(high.riskPercent).toBeLessThanOrEqual(1.001);
-  });
-
-  it('returns zero rather than a fractional share when fractions are unavailable', () => {
-    const result = sizePosition({
-      portfolioValue: 300,
-      price: 900,
-      maxSingleTradeRiskPercent: 1,
-      maxPositionPercent: 20,
-      score: 1,
-      allowFractional: false,
-    });
-    expect(result.quantity).toBe(0);
-    expect(result.boundBy).toBe('price');
-  });
-});
-
-describe('RiskEngine — halting conditions', () => {
-  it('halts trading once the daily loss limit is reached', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const halts = engine.haltingConditions(portfolio({ totalValue: 9_700, dayStartValue: 10_000 }));
-    expect(halts.map((h) => h.rule)).toContain('max_daily_loss');
-  });
-
-  it('halts once the daily trade count is reached', () => {
-    const engine = new RiskEngine({ config: config({ MAX_TRADES_PER_DAY: '3' }), clock });
-    expect(engine.haltingConditions(portfolio({ tradesToday: 3 })).map((h) => h.rule)).toContain(
-      'max_trades_per_day',
-    );
-  });
-
-  it('cools down after consecutive losses', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const halts = engine.haltingConditions(
-      portfolio({ consecutiveLosses: 3, lastLossAt: '2026-08-16T11:30:00Z' }),
-    );
-    expect(halts.map((h) => h.rule)).toContain('consecutive_loss_cooldown');
-  });
-
-  it('resumes trading once the cooldown has elapsed', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const halts = engine.haltingConditions(
-      portfolio({ consecutiveLosses: 3, lastLossAt: '2026-08-16T06:00:00Z' }),
-    );
-    expect(halts.map((h) => h.rule)).not.toContain('consecutive_loss_cooldown');
-  });
-});
-
-describe('RiskEngine — per-order rules', () => {
-  it('approves a well-formed order', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const decision = engine.evaluate(request(), portfolio());
-    expect(decision.verdict).toBe('approved');
-    expect(decision.quantity).toBeGreaterThan(0);
-    expect(decision.stopPrice).toBeLessThan(200);
-  });
-
-  it('rejects a stale price — DO NOT TRADE', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const decision = engine.evaluate(request({ priceAgeSeconds: 600 }), portfolio());
-    expect(decision.verdict).toBe('rejected');
-    expect(decision.rejections.map((r) => r.rule)).toContain('price_freshness');
-  });
-
-  it('rejects a low-scoring signal', () => {
-    const engine = new RiskEngine({ config: config(), clock, minScore: 0.6 });
-    const decision = engine.evaluate(request({ score: 0.4 }), portfolio());
-    expect(decision.rejections.map((r) => r.rule)).toContain('min_score');
-  });
-
-  it('rejects non-directional actions', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    for (const action of ['HOLD', 'WATCH'] as const) {
-      expect(engine.evaluate(request({ action }), portfolio()).verdict).toBe('rejected');
+    for (const f of d.facteurs.slice(1)) {
+      expect(f.multiplicateur, f.nom).toBeLessThanOrEqual(1);
     }
   });
 
-  it('overrides a maximally confident signal when a limit is breached', () => {
-    // The single most important property: a perfect score does not buy an
-    // exception to any rule.
-    const engine = new RiskEngine({ config: config(), clock });
-    const decision = engine.evaluate(
-      request({ score: 1, priceAgeSeconds: 9999 }),
-      portfolio({ totalValue: 9_000, dayStartValue: 10_000 }),
-    );
-    expect(decision.verdict).toBe('rejected');
-    expect(decision.quantity).toBe(0);
+  it('divise par deux après deux pertes consécutives', () => {
+    const base = { qualite: 0.8, drawdownPct: 0, ratio: 3, echantillonSetup: 30, liquide: true };
+    const calme = risqueRecommande({ ...base, pertesConsecutives: 0 });
+    const serie = risqueRecommande({ ...base, pertesConsecutives: 2 });
+    expect(serie.risquePct).toBeCloseTo(calme.risquePct / 2, 2);
   });
 
-  it('rejects a duplicate client order id', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const req = request({ clientOrderId: 'fixed-id' });
-    expect(engine.evaluate(req, portfolio()).verdict).toBe('approved');
-    const second = engine.evaluate(req, portfolio());
-    expect(second.rejections.map((r) => r.rule)).toContain('duplicate_order');
+  it('réduit quand le setup a une espérance négative mesurée', () => {
+    const base = { qualite: 0.8, pertesConsecutives: 0, drawdownPct: 0, ratio: 3, liquide: true };
+    const neutre = risqueRecommande({ ...base, echantillonSetup: 30 });
+    const mauvais = risqueRecommande({ ...base, echantillonSetup: 30, esperanceSetup: -0.4 });
+    expect(mauvais.risquePct).toBeLessThan(neutre.risquePct);
   });
 
-  it('does not consume the order id when the order is rejected', () => {
-    // Otherwise a corrected retry would be refused as a duplicate.
-    const engine = new RiskEngine({ config: config(), clock });
-    const id = 'retry-me';
-    expect(engine.evaluate(request({ clientOrderId: id, score: 0.1 }), portfolio()).verdict).toBe(
-      'rejected',
-    );
-    expect(engine.evaluate(request({ clientOrderId: id, score: 0.9 }), portfolio()).verdict).toBe(
-      'approved',
-    );
-  });
-
-  it('rejects short selling unless explicitly enabled', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const decision = engine.evaluate(request({ action: 'SELL' }), portfolio());
-    expect(decision.rejections.map((r) => r.rule)).toContain('direction_permitted');
-  });
-
-  it('allows selling a position that is actually held', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const held = portfolio({
-      positions: [
-        {
-          symbol: 'AAPL',
-          quantity: 10,
-          averagePrice: 180,
-          currency: 'EUR',
-          marketValue: 2000,
-          unrealisedPnl: 200,
-          openedAt: '2026-08-01T00:00:00Z',
-        },
-      ],
+  it('ignore une espérance négative sur un échantillon trop petit', () => {
+    // Trois trades ne prouvent rien, et réagir à trois trades est la façon la
+    // plus rapide d'apprendre du bruit.
+    const d = risqueRecommande({
+      qualite: 0.8,
+      pertesConsecutives: 0,
+      drawdownPct: 0,
+      ratio: 3,
+      echantillonSetup: 3,
+      esperanceSetup: -2,
+      liquide: true,
     });
-    const decision = engine.evaluate(request({ action: 'SELL' }), held);
-    expect(decision.checks.find((c) => c.rule === 'direction_permitted')?.passed).toBe(true);
+    expect(d.facteurs.some((f) => f.nom === 'esperance_negative')).toBe(false);
   });
 
-  it('enforces the maximum portfolio exposure', () => {
-    const engine = new RiskEngine({ config: config({ MAX_PORTFOLIO_EXPOSURE_PERCENT: '30' }), clock });
-    const loaded = portfolio({
-      cash: 2_000,
-      positions: [
-        {
-          symbol: 'MSFT',
-          quantity: 20,
-          averagePrice: 400,
-          currency: 'EUR',
-          marketValue: 8_000,
-          unrealisedPnl: 0,
-          openedAt: '2026-08-01T00:00:00Z',
-        },
-      ],
+  it('rend zéro quand le risque tombe sous le plancher', () => {
+    const d = risqueRecommande({
+      qualite: 0.05,
+      pertesConsecutives: 4,
+      drawdownPct: 14,
+      ratio: 1.5,
+      echantillonSetup: 2,
+      liquide: false,
     });
-    const decision = engine.evaluate(request(), loaded);
-    expect(decision.rejections.map((r) => r.rule)).toContain('max_portfolio_exposure');
-  });
-
-  it('enforces correlated exposure limits', () => {
-    const engine = new RiskEngine({ config: config({ MAX_CORRELATED_EXPOSURE_PERCENT: '10' }), clock });
-    const concentrated = portfolio({
-      positions: [
-        {
-          symbol: 'NVDA',
-          quantity: 5,
-          averagePrice: 200,
-          currency: 'EUR',
-          marketValue: 1_000,
-          unrealisedPnl: 0,
-          openedAt: '2026-08-01T00:00:00Z',
-          correlationGroup: 'semiconductors',
-        },
-      ],
-    });
-    const decision = engine.evaluate(
-      request({ symbol: 'AMD', correlationGroup: 'semiconductors' }),
-      concentrated,
-    );
-    expect(decision.rejections.map((r) => r.rule)).toContain('max_correlated_exposure');
-  });
-
-  it('rejects an order larger than available cash', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const decision = engine.evaluate(request(), portfolio({ cash: 10 }));
-    expect(decision.rejections.map((r) => r.rule)).toContain('sufficient_cash');
-  });
-
-  it('rejects orders too small to survive costs', () => {
-    const engine = new RiskEngine({ config: config(), clock, minNotional: 500 });
-    const decision = engine.evaluate(
-      // dayStartValue matches totalValue: this is a small account, not an
-      // account that just lost 99% (which would halt trading first).
-      request({ price: 5 }),
-      portfolio({ cash: 100, totalValue: 100, dayStartValue: 100, peakValue: 100 }),
-    );
-    expect(decision.rejections.map((r) => r.rule)).toContain('min_notional');
-  });
-
-  it('enforces the live allowlist in live mode', () => {
-    const liveConfig = config({
-      MODE: 'live',
-      LIVE_TRADING: 'true',
-      PAPER_TRADING: 'false',
-      LIVE_TRADING_CONFIRMATION: LIVE_CONFIRMATION_PHRASE,
-      ALLOWED_ASSETS: 'MSFT',
-    });
-    const engine = new RiskEngine({ config: liveConfig, clock });
-    const decision = engine.evaluate(request({ symbol: 'AAPL' }), portfolio());
-    expect(decision.rejections.map((r) => r.rule)).toContain('asset_allowlist');
-  });
-
-  it('records every check that ran, not just the first failure', () => {
-    const engine = new RiskEngine({ config: config(), clock });
-    const decision = engine.evaluate(request({ priceAgeSeconds: 9999, score: 0.1 }), portfolio());
-    expect(decision.checks.length).toBeGreaterThan(4);
-    expect(decision.rejections.length).toBeGreaterThan(1);
+    expect(d.risquePct).toBe(0);
   });
 });
 
-describe('RiskEngine — instrument permissions', () => {
-  it('refuses a memecoin pair with the default configuration', () => {
-    // The default .env promises crypto is off. Before the gate existed the
-    // promise was decorative: this order was sized and approved.
-    const engine = new RiskEngine({ config: config(), clock });
-    const decision = engine.evaluate(request({ symbol: 'DOGE/USD' }), portfolio());
-    expect(decision.verdict).toBe('rejected');
-    expect(decision.rejections.map((r) => r.rule)).toContain('instrument_permitted');
+describe('calculerTaille', () => {
+  it('déduit la quantité du risque et de la distance au stop', () => {
+    const t = calculerTaille({ capital: 1000, risquePct: 1, prixEntree: 100, prixStop: 95 });
+    // 1 % de 1000 = 10 € ; 5 € de risque par unité ; donc 2 unités.
+    expect(t?.quantite).toBeCloseTo(2, 6);
+    expect(t?.perteSiStop).toBeCloseTo(10, 2);
+    expect(t?.notionnel).toBeCloseTo(200, 2);
+    expect(t?.levier).toBeCloseTo(0.2, 2);
   });
 
-  it('enforces it in paper mode, not only live', () => {
-    // Paper results that include trades the real configuration forbids measure
-    // a system nobody is allowed to run.
-    const engine = new RiskEngine({ config: config({ MODE: 'paper' }), clock });
-    expect(engine.evaluate(request({ symbol: 'PEPE/USD' }), portfolio()).verdict).toBe('rejected');
+  it('donne le même résultat à la vente', () => {
+    const achat = calculerTaille({ capital: 1000, risquePct: 1, prixEntree: 100, prixStop: 95 });
+    const vente = calculerTaille({ capital: 1000, risquePct: 1, prixEntree: 100, prixStop: 105 });
+    expect(vente?.quantite).toBeCloseTo(achat!.quantite, 6);
   });
 
-  it('lets the pair through once ALLOW_CRYPTO is set', () => {
-    const engine = new RiskEngine({ config: config({ ALLOW_CRYPTO: 'true' }), clock });
-    const decision = engine.evaluate(request({ symbol: 'DOGE/USD' }), portfolio());
-    expect(decision.rejections.map((r) => r.rule)).not.toContain('instrument_permitted');
+  it('rend undefined quand le stop est sur le prix d\'entrée', () => {
+    // Il n'y a pas de risque défini, donc pas de taille. Rendre une taille
+    // infinie serait pire que de ne rien rendre.
+    expect(calculerTaille({ capital: 1000, risquePct: 1, prixEntree: 100, prixStop: 100 })).toBeUndefined();
   });
 
-  it('changes nothing for an equity', () => {
-    // A safety fix that quietly stops the existing watchlist trading would be
-    // a regression wearing a badge.
-    const engine = new RiskEngine({ config: config(), clock });
-    expect(engine.evaluate(request({ symbol: 'AAPL' }), portfolio()).verdict).toBe('approved');
-  });
-
-  it('records the check even when it passes', () => {
-    // A gate that only appears in the log when it fires cannot be audited.
-    const engine = new RiskEngine({ config: config(), clock });
-    const decision = engine.evaluate(request(), portfolio());
-    expect(decision.checks.map((c) => c.rule)).toContain('instrument_permitted');
+  it('signale que la conversion de devise est supposée', () => {
+    const t = calculerTaille({ capital: 1000, risquePct: 1, prixEntree: 100, prixStop: 95 });
+    expect(t?.conversionSupposee).toBe(true);
+    const converti = calculerTaille({
+      capital: 1000,
+      risquePct: 1,
+      prixEntree: 100,
+      prixStop: 95,
+      tauxDeviseCompte: 0.92,
+    });
+    expect(converti?.conversionSupposee).toBe(false);
   });
 });
 
-describe('live trading gate', () => {
-  it('blocks live trading under a paper configuration', () => {
-    expect(() => assertLiveTradingAllowed(config())).toThrow(LiveTradingBlockedError);
+describe('ratioGainRisque', () => {
+  it('marche à l\'achat comme à la vente', () => {
+    expect(ratioGainRisque(100, 95, 110)).toBe(2);
+    expect(ratioGainRisque(100, 105, 90)).toBe(2);
   });
 
-  it('lists every unmet condition', () => {
-    try {
-      assertLiveTradingAllowed(config());
-      throw new Error('expected the gate to block');
-    } catch (err) {
-      expect((err as LiveTradingBlockedError).reasons.length).toBeGreaterThan(1);
+  it('rend zéro sans risque défini', () => {
+    expect(ratioGainRisque(100, 100, 110)).toBe(0);
+  });
+});
+
+describe('fraisEnR', () => {
+  it('exprime les frais en fraction du risque', () => {
+    // 2000 € de position à 0,1 % = 2 € de frais, sur 10 € de risque = 0,2 R.
+    expect(fraisEnR(2000, 10, 0.1)).toBeCloseTo(0.2, 3);
+  });
+});
+
+describe('MoteurRisque', () => {
+  const moteur = new MoteurRisque();
+
+  it('approuve une proposition saine', () => {
+    const d = moteur.evaluer(proposition, compteSain);
+    expect(d.refus).toHaveLength(0);
+    expect(d.risquePct).toBeGreaterThan(0);
+    expect(d.quantite).toBeGreaterThan(0);
+  });
+
+  it('refuse un ratio sous le minimum', () => {
+    const d = moteur.evaluer({ ...proposition, prixCible: 78500 }, compteSain);
+    expect(d.refus.map((r) => r.regle)).toContain('ratio_minimum');
+  });
+
+  it('refuse un stop du mauvais côté', () => {
+    const d = moteur.evaluer({ ...proposition, prixStop: 79000 }, compteSain);
+    expect(d.refus.map((r) => r.regle)).toContain('stop_du_bon_cote');
+  });
+
+  it('refuse une paire non reconnue plutôt que de deviner', () => {
+    const d = moteur.evaluer({ ...proposition, symbole: 'AAPL' }, compteSain);
+    expect(d.refus.map((r) => r.regle)).toContain('paire_reconnue');
+  });
+
+  it('fait tourner toutes les vérifications même après un refus', () => {
+    // Le journal doit montrer l'image complète, pas la première objection.
+    const d = moteur.evaluer({ ...proposition, prixCible: 78000, prixStop: 79000 }, compteSain);
+    expect(d.refus.map((r) => r.regle)).toEqual(
+      expect.arrayContaining(['stop_du_bon_cote', 'cible_du_bon_cote']),
+    );
+    expect(d.verifications.length).toBeGreaterThan(3);
+  });
+
+  it('arrête la journée passé la perte journalière', () => {
+    const d = moteur.evaluer(proposition, { ...compteSain, capital: 950 });
+    const arret = d.refus.find((r) => r.regle === 'arret_journalier');
+    expect(arret?.bloquant).toBe(true);
+  });
+
+  it('arrête la semaine passé la perte hebdomadaire', () => {
+    const d = moteur.evaluer(proposition, {
+      ...compteSain,
+      capital: 910,
+      capitalDebutJour: 915,
+    });
+    expect(d.refus.map((r) => r.regle)).toContain('arret_hebdomadaire');
+  });
+
+  it('impose un bilan passé le drawdown maximum', () => {
+    const d = moteur.evaluer(proposition, {
+      ...compteSain,
+      capital: 840,
+      capitalDebutJour: 845,
+      capitalDebutSemaine: 845,
+      plusHaut: 1000,
+    });
+    expect(d.refus.map((r) => r.regle)).toContain('drawdown_maximum');
+  });
+
+  it('met en pause après trois pertes consécutives', () => {
+    const d = moteur.evaluer(proposition, {
+      ...compteSain,
+      pertesConsecutives: 3,
+      dernierePerteLe: new Date().toISOString(),
+    });
+    expect(d.refus.map((r) => r.regle)).toContain('pause_apres_pertes');
+  });
+
+  it('laisse repasser une fois la pause écoulée', () => {
+    const vieux = new Date(Date.now() - (BORNES.pauseMinutes + 10) * 60_000).toISOString();
+    const d = moteur.evaluer(proposition, {
+      ...compteSain,
+      pertesConsecutives: 3,
+      dernierePerteLe: vieux,
+    });
+    expect(d.refus.map((r) => r.regle)).not.toContain('pause_apres_pertes');
+  });
+
+  it('refuse au-delà du nombre de positions ouvertes', () => {
+    const position = {
+      symbole: 'ETH/USD',
+      sens: 'achat' as const,
+      notionnel: 500,
+      risqueOuvert: 10,
+      groupeCorrele: 'crypto',
+      expositionDollar: -1 as const,
+      ouverteLe: new Date().toISOString(),
+    };
+    const d = moteur.evaluer(proposition, {
+      ...compteSain,
+      positions: [position, { ...position, symbole: 'SOL/USD' }, { ...position, symbole: 'XRP/USD' }],
+    });
+    expect(d.refus.map((r) => r.regle)).toContain('positions_simultanees');
+  });
+
+  it('refuse quand le risque déjà engagé est au plafond', () => {
+    const d = moteur.evaluer(proposition, {
+      ...compteSain,
+      positions: [
+        {
+          symbole: 'ETH/USD',
+          sens: 'achat',
+          notionnel: 500,
+          risqueOuvert: 39,
+          groupeCorrele: 'or',
+          expositionDollar: 0,
+          ouverteLe: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(d.refus.map((r) => r.regle)).toContain('risque_cumule');
+  });
+
+  it("applique une règle apprise qui demande le refus", () => {
+    const d = moteur.evaluer(
+      {
+        ...proposition,
+        reglesApprises: [{ id: 'R-01', action: 'refuser', motif: 'session asiatique' }],
+      },
+      compteSain,
+    );
+    expect(d.refus.map((r) => r.regle)).toContain('regle_R-01');
+  });
+
+  it('réduit de moitié quand une règle apprise le demande', () => {
+    const sans = moteur.evaluer(proposition, compteSain);
+    const avec = moteur.evaluer(
+      {
+        ...proposition,
+        reglesApprises: [{ id: 'R-02', action: 'reduire', motif: 'volume faible' }],
+      },
+      compteSain,
+    );
+    expect(avec.risquePct).toBeCloseTo(sans.risquePct / 2, 2);
+  });
+
+  it('ne laisse aucune règle apprise augmenter le risque', () => {
+    // Il n'existe pas de valeur d'action qui augmente. Le type l'interdit, et
+    // ce test le vérifie sur le comportement.
+    const sans = moteur.evaluer(proposition, compteSain);
+    const avec = moteur.evaluer(
+      {
+        ...proposition,
+        reglesApprises: [
+          { id: 'R-03', action: 'reduire', motif: 'a' },
+          { id: 'R-04', action: 'reduire', motif: 'b' },
+        ],
+      },
+      compteSain,
+    );
+    expect(avec.risquePct).toBeLessThan(sans.risquePct);
+  });
+
+  it('ne dépasse jamais le plafond de risque quel que soit le chemin', () => {
+    for (const qualite of [0.5, 0.8, 1]) {
+      const d = moteur.evaluer({ ...proposition, qualite, prixCible: 90000 }, compteSain);
+      expect(d.risquePct, `qualité ${qualite}`).toBeLessThanOrEqual(BORNES.risqueMaxPct);
     }
-  });
-
-  const liveConfig = () =>
-    config({
-      MODE: 'live',
-      LIVE_TRADING: 'true',
-      PAPER_TRADING: 'false',
-      LIVE_TRADING_CONFIRMATION: LIVE_CONFIRMATION_PHRASE,
-      ALLOWED_ASSETS: 'AAPL',
-    });
-
-  const marketData = () =>
-    new MarketDataService({
-      providers: [new FixtureMarketDataAdapter({ clock, basePrices: { AAPL: 200 } })],
-      maxStalenessSeconds: 120,
-      clock,
-    });
-
-  it('refuses to build a live broker without credentials, even when the gate passes', () => {
-    expect(() => assertLiveTradingAllowed(liveConfig())).not.toThrow();
-    // The gate opening is necessary, not sufficient.
-    expect(() => createLiveBroker(liveConfig(), { marketData: marketData() })).toThrow(
-      LiveTradingBlockedError,
-    );
-  });
-
-  it('refuses to build a live broker under a paper configuration, credentials or not', () => {
-    expect(() =>
-      createLiveBroker(config({ ALPACA_API_KEY_ID: 'k', ALPACA_API_SECRET_KEY: 's' }), {
-        marketData: marketData(),
-      }),
-    ).toThrow(LiveTradingBlockedError);
-  });
-});
-
-describe('Alpaca broker', () => {
-  const marketData = () =>
-    new MarketDataService({
-      providers: [new FixtureMarketDataAdapter({ clock, basePrices: { AAPL: 200 } })],
-      maxStalenessSeconds: 120,
-      clock,
-    });
-
-  function broker(overrides: Record<string, string> = {}, fetchImpl?: FetchImpl) {
-    return new AlpacaBroker({
-      config: config({ ALLOWED_ASSETS: 'AAPL', ...overrides }),
-      endpoint: 'paper',
-      apiKeyId: 'test-key-id',
-      apiSecretKey: 'test-secret-key',
-      marketData: marketData(),
-      clock,
-      ...(fetchImpl ? { fetchImpl } : {}),
-    });
-  }
-
-  it('exposes no method that could move money out of the account', () => {
-    const surface = broker() as unknown as Record<string, unknown>;
-    for (const forbidden of [
-      'withdraw',
-      'transfer',
-      'createTransfer',
-      'closeAccount',
-      'updateBankDetails',
-      'createAchRelationship',
-      'requestJournal',
-    ]) {
-      expect(surface[forbidden]).toBeUndefined();
-    }
-  });
-
-  it('rejects a symbol outside the allowlist before any request is made', async () => {
-    let called = false;
-    const fetchImpl: FetchImpl = async () => {
-      called = true;
-      return new Response('{}', { status: 200 });
-    };
-
-    await expect(
-      broker({}, fetchImpl).placeOrder({
-        symbol: 'TSLA',
-        side: 'buy',
-        quantity: 1,
-        type: 'market',
-        clientOrderId: 'o-1',
-      }),
-    ).rejects.toThrow(BrokerRejectionError);
-
-    // The point is that nothing reached the broker at all.
-    expect(called).toBe(false);
-  });
-
-  it('marks the paper endpoint as paper', () => {
-    expect(broker().isPaper).toBe(true);
-  });
-
-  it('refuses a live endpoint under a paper configuration', () => {
-    expect(
-      () =>
-        new AlpacaBroker({
-          config: config({ ALLOWED_ASSETS: 'AAPL' }),
-          endpoint: 'live',
-          apiKeyId: 'k',
-          apiSecretKey: 's',
-          marketData: marketData(),
-          clock,
-        }),
-    ).toThrow(LiveTradingBlockedError);
-  });
-
-  it('sends credentials in headers and never in the URL', async () => {
-    let seenUrl = '';
-    let seenHeaders: Record<string, string> = {};
-    const fetchImpl: FetchImpl = async (url, init) => {
-      seenUrl = url;
-      seenHeaders = (init?.headers ?? {}) as Record<string, string>;
-      return new Response(JSON.stringify({ cash: '1000', currency: 'USD', equity: '1200', status: 'ACTIVE' }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    };
-
-    await broker({}, fetchImpl).getAccount();
-
-    expect(seenUrl).not.toContain('test-secret-key');
-    expect(seenHeaders['APCA-API-SECRET-KEY']).toBe('test-secret-key');
-  });
-
-  it('carries the client order id so a retry cannot become a second position', async () => {
-    let body: Record<string, unknown> = {};
-    const fetchImpl: FetchImpl = async (_url, init) => {
-      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return new Response(
-        JSON.stringify({
-          id: 'srv-1',
-          client_order_id: 'o-42',
-          symbol: 'AAPL',
-          side: 'buy',
-          type: 'market',
-          qty: '3',
-          filled_qty: '0',
-          status: 'accepted',
-          submitted_at: '2026-08-16T12:00:00Z',
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
-    };
-
-    const order = await broker({}, fetchImpl).placeOrder({
-      symbol: 'AAPL',
-      side: 'buy',
-      quantity: 3,
-      type: 'market',
-      clientOrderId: 'o-42',
-    });
-
-    expect(body.client_order_id).toBe('o-42');
-    expect(body.time_in_force).toBe('day');
-    expect(order.status).toBe('pending');
-  });
-
-  it('reads an unknown broker status as pending, never as filled', async () => {
-    const fetchImpl: FetchImpl = async () =>
-      new Response(
-        JSON.stringify({
-          id: 'srv-2',
-          client_order_id: 'o-43',
-          symbol: 'AAPL',
-          side: 'buy',
-          type: 'market',
-          qty: '1',
-          status: 'some_state_alpaca_added_later',
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
-
-    expect((await broker({}, fetchImpl).getOrderStatus('srv-2')).status).toBe('pending');
-  });
-
-  it('refuses to sell more than it holds while short selling is off', async () => {
-    const fetchImpl: FetchImpl = async () =>
-      new Response(JSON.stringify([{ symbol: 'AAPL', qty: '2', avg_entry_price: '200' }]), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-
-    await expect(
-      broker({}, fetchImpl).placeOrder({
-        symbol: 'AAPL',
-        side: 'sell',
-        quantity: 5,
-        type: 'market',
-        clientOrderId: 'o-44',
-      }),
-    ).rejects.toThrow(/short/i);
   });
 });
